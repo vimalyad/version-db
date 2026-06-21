@@ -3,6 +3,7 @@ package com.minidb.query.exec;
 import com.minidb.shared.Value;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -54,7 +55,8 @@ public final class Tuple {
     }
 
     public List<Value> values() {
-        return List.copyOf(values);
+        // unmodifiable, but null-tolerant (a column's value may be SQL NULL).
+        return Collections.unmodifiableList(new ArrayList<>(values));
     }
 
     /**

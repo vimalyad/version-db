@@ -178,6 +178,17 @@ public final class Catalog {
     }
 
     /**
+     * Every table currently known to the catalog. Used at startup to rebuild the
+     * query layer's runtime registries (heap files and indexes), which are not
+     * themselves persisted.
+     *
+     * @return an unmodifiable snapshot of all table metadata
+     */
+    public synchronized List<TableMeta> allTables() {
+        return List.copyOf(tablesByName.values());
+    }
+
+    /**
      * @return the table's columns in row order (by column index); an empty list
      *         if the table is unknown or has no columns.
      */
