@@ -19,6 +19,9 @@ import com.minidb.txn.TransactionManager;
 import com.minidb.txn.Vacuum;
 import com.minidb.txn.VersionRecord;
 import com.minidb.txn.VersionStore;
+import com.minidb.shared.RID;
+import com.minidb.wal.LogRecord;
+import com.minidb.wal.LogType;
 import com.minidb.wal.RecoveryManager;
 import com.minidb.wal.WALManager;
 
@@ -26,6 +29,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -53,12 +57,13 @@ import java.util.Map;
  *
  * <h2>Version-store reseed</h2>
  * The version store is in-memory and not persisted, so on restart it is empty
- * and the MVCC visibility check would find no versions. ARIES recovery, however,
- * has already reconstructed the committed physical state in the heap (committed
- * inserts are present, uncommitted inserts and committed deletes are tombstoned).
- * We therefore scan each heap after recovery and register one committed base
- * version per live slot, stamped with a sentinel {@code xmin} below every future
- * snapshot's {@code xmin} so the row is visible to all subsequent transactions.
+ * and the MVCC visibility check would find no versions. We rebuild it by
+ * replaying the committed WAL history: every committed INSERT that was not later
+ * deleted by a committed transaction becomes one committed base version, stamped
+ * with a sentinel {@code xmin} below every future snapshot's {@code xmin} so the
+ * row is visible to all subsequent transactions. (The heap alone is insufficient:
+ * a DELETE only stamps the in-memory version store, so dead tuple bytes remain
+ * physically present and would otherwise reappear after a restart.)
  *
  * <h2>Autocommit vs. explicit transactions</h2>
  * {@link #execute(String)} runs one statement in its own transaction (commit on
@@ -287,19 +292,37 @@ public final class MiniDb implements AutoCloseable {
     }
 
     /**
-     * Register a committed base version for every live heap slot, so reads after
-     * a restart see the recovered committed data (see the class note).
+     * Rebuild the version store from the committed WAL history so reads after a
+     * restart see exactly the committed, not-since-deleted tuples.
+     *
+     * <p>The heap cannot be trusted directly: a DELETE (and the old side of an
+     * UPDATE) only stamps the in-memory version store and the page LSN, so
+     * recovery's redo skips it and the dead bytes remain physically present.
+     * Replaying the WAL and keeping only committed INSERTs that were not later
+     * deleted by a committed transaction reconstructs the correct visible set.
+     * Each surviving tuple becomes a committed base version (see the class note).
+     * CLRs belong to aborted (loser) transactions, which never commit, so their
+     * effects are excluded by the commit-status filter.
      */
     private void reseedVersionStore() {
-        for (HeapFile heap : heapFiles.values()) {
-            Iterator<HeapFile.Entry> scan = heap.scan();
-            while (scan.hasNext()) {
-                HeapFile.Entry entry = scan.next();
-                VersionRecord base = new VersionRecord(
-                        BASE_VERSION_XMIN, Constants.INVALID_XID, entry.rid(), -1L, entry.data());
-                long versionId = versionStore.allocate(base);
-                versionStore.setHead(entry.rid(), versionId);
+        Map<RID, byte[]> live = new LinkedHashMap<>();
+        Iterator<LogRecord> log = walManager.readLog(0L);
+        while (log.hasNext()) {
+            LogRecord rec = log.next();
+            if (!commitLog.isCommitted(rec.txnId)) {
+                continue;
             }
+            if (rec.logType == LogType.INSERT) {
+                live.put(new RID(rec.pageId, rec.slotId), rec.data);
+            } else if (rec.logType == LogType.DELETE) {
+                live.remove(new RID(rec.pageId, rec.slotId));
+            }
+        }
+        for (Map.Entry<RID, byte[]> entry : live.entrySet()) {
+            VersionRecord base = new VersionRecord(
+                    BASE_VERSION_XMIN, Constants.INVALID_XID, entry.getKey(), -1L, entry.getValue());
+            long versionId = versionStore.allocate(base);
+            versionStore.setHead(entry.getKey(), versionId);
         }
     }
 }
