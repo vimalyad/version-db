@@ -22,8 +22,9 @@ import java.util.List;
  * <p>This class is built up across the Phase 11 sub-phases:
  * <ul>
  *   <li>11.1 — {@link #isReclaimable} reclaim predicate + {@link #currentHorizon}</li>
- *   <li>11.2 — {@code runOnce()} chain sweep (added next)</li>
- *   <li>11.3 — background scheduler + physical heap-slot reclamation</li>
+ *   <li>11.2 — {@link #runOnce()} chain sweep</li>
+ *   <li>11.3 — background scheduler ({@link #start}/{@link #stop}) + physical
+ *       heap-slot reclamation for fully-dead rows</li>
  * </ul>
  */
 public final class Vacuum {
@@ -31,13 +32,34 @@ public final class Vacuum {
     private final VersionStore versionStore;
     private final CommitLog commitLog;
     private final TransactionManager txnManager;
+    private final HeapReclaimer heapReclaimer;
 
+    /** Background worker; non-null only while the scheduler is running. */
+    private volatile Thread worker;
+    private volatile boolean running;
+
+    /**
+     * Create a vacuum that reclaims versions only. Physical heap slots for
+     * fully-dead rows are left in place (no-op reclaimer).
+     */
     public Vacuum(VersionStore versionStore,
                   CommitLog commitLog,
                   TransactionManager txnManager) {
+        this(versionStore, commitLog, txnManager, HeapReclaimer.NO_OP);
+    }
+
+    /**
+     * Create a vacuum that also physically frees heap slots for fully-dead rows
+     * via {@code heapReclaimer}.
+     */
+    public Vacuum(VersionStore versionStore,
+                  CommitLog commitLog,
+                  TransactionManager txnManager,
+                  HeapReclaimer heapReclaimer) {
         this.versionStore = versionStore;
         this.commitLog = commitLog;
         this.txnManager = txnManager;
+        this.heapReclaimer = heapReclaimer;
     }
 
     /**
@@ -141,10 +163,73 @@ public final class Vacuum {
             versionStore.remove(ids.get(i));
             removed++;
         }
-        // Detach the surviving tail (the version just above the removed run).
+
         if (firstRemoved > 0) {
+            // Some versions survive: detach the surviving oldest as the new tail.
             recs.get(firstRemoved - 1).prevVersionId = -1L;
+        } else {
+            // The head itself was reclaimable: the row is fully dead. Physically
+            // free its heap slot and stop tracking the RID. Safe because the
+            // deletion is visible to every transaction, so no reader will ever
+            // resolve a version for this RID again.
+            heapReclaimer.freeSlot(rid);
+            versionStore.removeHead(rid);
         }
         return removed;
+    }
+
+    // =========================================================================
+    // 11.3 — background scheduler
+    // =========================================================================
+
+    /**
+     * Start a background daemon thread that runs {@link #runOnce()} every
+     * {@code periodMillis} milliseconds. Idempotent: a second call while already
+     * running has no effect. In production this is triggered periodically (e.g.
+     * every N transactions); a fixed period keeps the capstone simple.
+     */
+    public synchronized void start(long periodMillis) {
+        if (running) return;
+        running = true;
+        Thread t = new Thread(() -> {
+            while (running) {
+                try {
+                    Thread.sleep(periodMillis);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+                if (!running) break;
+                try {
+                    runOnce();
+                } catch (RuntimeException e) {
+                    // A transient failure must not kill the vacuum thread; the
+                    // next tick retries.
+                }
+            }
+        }, "minidb-vacuum");
+        t.setDaemon(true);
+        worker = t;
+        t.start();
+    }
+
+    /** Stop the background scheduler and wait briefly for the worker to exit. */
+    public synchronized void stop() {
+        running = false;
+        Thread t = worker;
+        if (t != null) {
+            t.interrupt();
+            try {
+                t.join(1000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            worker = null;
+        }
+    }
+
+    /** Whether the background scheduler is currently running. */
+    public boolean isRunning() {
+        return running;
     }
 }

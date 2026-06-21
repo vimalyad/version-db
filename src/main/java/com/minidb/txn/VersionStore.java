@@ -130,6 +130,20 @@ public final class VersionStore {
         }
     }
 
+    /**
+     * Drop the chain-head mapping for {@code rid}. Called by the vacuum process
+     * when a row is fully dead (its entire version chain has been reclaimed), so
+     * the RID is no longer tracked. A no-op if the RID has no head.
+     */
+    public void removeHead(RID rid) {
+        rwLock.writeLock().lock();
+        try {
+            chainHead.remove(rid);
+        } finally {
+            rwLock.writeLock().unlock();
+        }
+    }
+
     /** Total number of version records (across all chains). */
     public int size() {
         rwLock.readLock().lock();
