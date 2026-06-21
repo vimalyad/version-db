@@ -1,7 +1,9 @@
 package com.minidb.query.exec;
 
 import com.minidb.query.BPlusTree;
+import com.minidb.query.Optimizer;
 import com.minidb.query.Parser;
+import com.minidb.query.plan.PhysicalPlan;
 import com.minidb.query.ast.Assignment;
 import com.minidb.query.ast.CreateIndexStatement;
 import com.minidb.query.ast.CreateTableStatement;
@@ -82,9 +84,49 @@ public final class QueryExecutor {
         throw new StorageException("unsupported statement " + stmt.getClass().getSimpleName());
     }
 
-    /** SELECT execution — added in sub-phase 15.8. */
+    /** Optimize a SELECT, build the operator tree, and drive it to a ResultSet. */
     ResultSet executeSelect(SelectStatement select, Transaction txn) {
-        throw new StorageException("SELECT execution not yet implemented");
+        PhysicalPlan plan = new Optimizer(catalog).optimize(select);
+        ExecutionContext ctx = new ExecutionContext(txn, mvcc, catalog, heapFiles, indexes);
+        Operator op = PlanBuilder.build(plan, ctx);
+
+        List<String> columns = null;
+        List<List<Value>> rows = new ArrayList<>();
+        op.open();
+        try {
+            Tuple t;
+            while ((t = op.next()) != null) {
+                if (columns == null) {
+                    columns = new ArrayList<>(t.columnNames());
+                }
+                rows.add(t.values());
+            }
+        } finally {
+            op.close();
+        }
+        if (columns == null) {
+            columns = headerForEmptyResult(select); // no rows produced
+        }
+        return ResultSet.of(columns, rows);
+    }
+
+    /** Best-effort column headers when a query returns no rows. */
+    private List<String> headerForEmptyResult(SelectStatement select) {
+        List<String> cols = new ArrayList<>();
+        for (var item : select.projections()) {
+            if (item.expr() instanceof com.minidb.query.ast.Star) {
+                if (select.from() instanceof com.minidb.query.ast.TableRef ref) {
+                    cols.addAll(TableSchema.load(catalog, ref.table()).columnNames);
+                }
+            } else if (item.alias() != null) {
+                cols.add(item.alias());
+            } else if (item.expr() instanceof com.minidb.query.ast.ColumnRef ref) {
+                cols.add(ref.column());
+            } else {
+                cols.add("col" + (cols.size() + 1));
+            }
+        }
+        return cols;
     }
 
     // ---- 15.7: writes & DDL ---------------------------------------------------
