@@ -332,6 +332,9 @@ class WALManagerTest {
         LogRecord first = it.next();
         assertEquals(insertLsn, first.lsn,
                 "readLog(startLsn) must start at the given LSN");
+        // Drain the rest so the iterator closes its underlying file handle;
+        // otherwise the open handle blocks @TempDir cleanup on Windows.
+        it.forEachRemaining(r -> { });
     }
 
     @Test
