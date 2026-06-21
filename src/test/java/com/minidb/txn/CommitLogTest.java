@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.minidb.shared.StorageException;
 
 import java.nio.file.Path;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -175,6 +176,25 @@ class CommitLogTest {
             for (int i = 0; i < n; i++) {
                 assertTrue(log.isCommitted(i), "xid " + i + " should be committed");
             }
+        }
+    }
+
+    @Test
+    void reconcileMarksRecoveredTransactions() {
+        try (CommitLog log = new CommitLog(clog())) {
+            // Two transactions left IN_PROGRESS by a crash, now resolved by recovery.
+            log.reconcile(Set.of(11L), Set.of(10L));
+            assertEquals(TxStatus.COMMITTED, log.getStatus(10));
+            assertEquals(TxStatus.ABORTED, log.getStatus(11));
+        }
+    }
+
+    @Test
+    void reconcileLetsCommittedWinOverAborted() {
+        try (CommitLog log = new CommitLog(clog())) {
+            // A durable COMMIT record is authoritative even if the id is in both sets.
+            log.reconcile(Set.of(20L), Set.of(20L));
+            assertEquals(TxStatus.COMMITTED, log.getStatus(20));
         }
     }
 
