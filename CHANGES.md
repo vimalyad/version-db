@@ -18,7 +18,7 @@ How to use it:
 |---|---|---|---|
 | 0 — Foundation | `phase-00-foundation` | shared | done |
 | 1 — Page & DiskManager | `phase-01-storage-page` | M1 | done |
-| 2 — Buffer Pool | `phase-02-bufferpool` | M1 | not started |
+| 2 — Buffer Pool | `phase-02-bufferpool` | M1 | done |
 | 3 — Heap File | `phase-03-heapfile` | M1 | not started |
 | 4 — Catalog | `phase-04-catalog` | M1 | not started |
 | 5 — WAL Manager | `phase-05-wal` | M1 | not started |
@@ -83,3 +83,4 @@ Newest entries at the top. Format per entry:
 - [2026-06-21] 2.2 — `fetchPage(pageId)` (cache hit returns pinned page, miss reads from disk into first free frame), `unpin(pageId, dirty)`, `markDirty(pageId)`, `newPage()` (allocates via DiskManager, loads into free frame pinned). Eviction deferred to 2.3; full pool throws `StorageException`. Files: `storage/BufferPool.java`, `test/.../storage/BufferPoolTest.java`.
 - [2026-06-21] 2.3 — Clock eviction: `evict()` sweeps the frame array with a `clockHand`, giving each unpinned frame with `refBit=true` one second chance (clear bit, continue); evicts the first unpinned frame with `refBit=false`. Dirty victim written to disk before eviction. `fetchPage` and `newPage` now call `evict()` on cache miss; all-pinned pool throws `StorageException`. Files: `storage/BufferPool.java`, `test/.../storage/BufferPoolTest.java`.
 - [2026-06-21] 2.4 — `flushPage(pageId)` and `flushAll()` with the WAL rule: `walFlushCallback.flushToLsn(page.lsn)` is called before every dirty-page disk write in both `flushPage` and `evict()`'s dirty-victim path, via a shared `writeDirtyFrame(frame)` helper. `flushPage` is a no-op for clean pages; `flushAll` iterates all frames. Files: `storage/BufferPool.java`, `test/.../storage/BufferPoolTest.java`.
+- [2026-06-21] 2.5 — Thread safety: single `ReentrantLock` guards all frame-array and page-table mutations; lock is released around every disk I/O (read in `fetchPage`/`newPage`, WAL+write in `writeDirtyFrame`). A dirty victim in `evict()` is temporarily pinned (`pinCount=1`) before the lock is released for I/O, preventing re-eviction by another thread. Concurrent smoke test passes. Files: `storage/BufferPool.java`, `test/.../storage/BufferPoolTest.java`. **Phase 2 complete** (62 tests green).

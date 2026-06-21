@@ -4,6 +4,7 @@ import com.minidb.shared.StorageException;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * In-memory cache of database pages. Every read and write of a page by any
@@ -14,6 +15,13 @@ import java.util.Map;
  * are occupied, Clock eviction selects a victim. A dirty victim is flushed to
  * disk first, respecting the WAL rule: the injected {@link WalFlushCallback}
  * is called before the write to guarantee WAL records are durable first.
+ *
+ * <p><b>Thread safety:</b> a single {@link ReentrantLock} guards all
+ * frame-array and page-table mutations. Disk I/O (reads and writes) is always
+ * performed with the lock released, so concurrent callers do not serialize on
+ * I/O. During I/O, the frame being loaded or flushed is marked with
+ * {@code pinCount = 1} before the lock is released so the Clock eviction
+ * algorithm never selects it as a victim.
  */
 public final class BufferPool {
 
@@ -28,6 +36,9 @@ public final class BufferPool {
 
     /** Clock hand: next candidate frame for eviction. */
     private int clockHand = 0;
+
+    /** Guards all frame-array and page-table mutations. Released around I/O. */
+    private final ReentrantLock lock = new ReentrantLock();
 
     /**
      * Create a buffer pool with the given capacity.
@@ -62,24 +73,38 @@ public final class BufferPool {
      * return it pinned. The caller must call {@link #unpin} when done.
      */
     public Page fetchPage(int pageId) {
-        Integer idx = pageTable.get(pageId);
-        if (idx != null) {
-            Frame f = frames[idx];
-            f.pinCount++;
-            f.refBit = true;
-            return f.page;
-        }
+        lock.lock();
+        try {
+            Integer idx = pageTable.get(pageId);
+            if (idx != null) {
+                Frame f = frames[idx];
+                f.pinCount++;
+                f.refBit = true;
+                return f.page;
+            }
 
-        // Cache miss — evict a victim frame via Clock
-        int victimIdx = evict();
-        Frame f = frames[victimIdx];
-        f.page = diskManager.readPage(pageId);
-        f.pageId = pageId;
-        f.pinCount = 1;
-        f.isDirty = false;
-        f.refBit = true;
-        pageTable.put(pageId, victimIdx);
-        return f.page;
+            // Cache miss — evict a victim frame and claim it with pinCount=1
+            int victimIdx = evict();
+            Frame f = frames[victimIdx];
+            f.pageId = pageId;
+            f.pinCount = 1;  // prevents re-eviction during the I/O window below
+            f.isDirty = false;
+            f.refBit = true;
+            f.page = null;
+
+            // Release lock for disk read — frame is safe (pinCount=1)
+            lock.unlock();
+            try {
+                f.page = diskManager.readPage(pageId);
+            } finally {
+                lock.lock();
+            }
+
+            pageTable.put(pageId, victimIdx);
+            return f.page;
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -87,27 +112,37 @@ public final class BufferPool {
      * frame dirty so it will be flushed before eviction.
      */
     public void unpin(int pageId, boolean dirty) {
-        Integer idx = pageTable.get(pageId);
-        if (idx == null) {
-            throw new StorageException("unpin: page " + pageId + " not in buffer pool");
-        }
-        Frame f = frames[idx];
-        if (f.pinCount <= 0) {
-            throw new StorageException("unpin: page " + pageId + " pin count is already 0");
-        }
-        f.pinCount--;
-        if (dirty) {
-            f.isDirty = true;
+        lock.lock();
+        try {
+            Integer idx = pageTable.get(pageId);
+            if (idx == null) {
+                throw new StorageException("unpin: page " + pageId + " not in buffer pool");
+            }
+            Frame f = frames[idx];
+            if (f.pinCount <= 0) {
+                throw new StorageException("unpin: page " + pageId + " pin count is already 0");
+            }
+            f.pinCount--;
+            if (dirty) {
+                f.isDirty = true;
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
     /** Mark a page dirty — it has been modified and must be flushed before eviction. */
     public void markDirty(int pageId) {
-        Integer idx = pageTable.get(pageId);
-        if (idx == null) {
-            throw new StorageException("markDirty: page " + pageId + " not in buffer pool");
+        lock.lock();
+        try {
+            Integer idx = pageTable.get(pageId);
+            if (idx == null) {
+                throw new StorageException("markDirty: page " + pageId + " not in buffer pool");
+            }
+            frames[idx].isDirty = true;
+        } finally {
+            lock.unlock();
         }
-        frames[idx].isDirty = true;
     }
 
     /**
@@ -115,16 +150,31 @@ public final class BufferPool {
      * and return it. The caller must call {@link #unpin} when done.
      */
     public Page newPage() {
+        // allocatePage involves disk I/O — do it outside the pool lock
         int newPageId = diskManager.allocatePage();
-        int victimIdx = evict();
-        Frame f = frames[victimIdx];
-        f.page = diskManager.readPage(newPageId);
-        f.pageId = newPageId;
-        f.pinCount = 1;
-        f.isDirty = false;
-        f.refBit = true;
-        pageTable.put(newPageId, victimIdx);
-        return f.page;
+
+        lock.lock();
+        try {
+            int victimIdx = evict();
+            Frame f = frames[victimIdx];
+            f.pageId = newPageId;
+            f.pinCount = 1;
+            f.isDirty = false;
+            f.refBit = true;
+            f.page = null;
+
+            lock.unlock();
+            try {
+                f.page = diskManager.readPage(newPageId);
+            } finally {
+                lock.lock();
+            }
+
+            pageTable.put(newPageId, victimIdx);
+            return f.page;
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -134,29 +184,49 @@ public final class BufferPool {
      * No-op if the page is not in the pool or is not dirty.
      */
     public void flushPage(int pageId) {
-        Integer idx = pageTable.get(pageId);
-        if (idx == null || !frames[idx].isDirty) {
-            return;
+        lock.lock();
+        try {
+            Integer idx = pageTable.get(pageId);
+            if (idx == null || !frames[idx].isDirty) {
+                return;
+            }
+            writeDirtyFrame(frames[idx]);
+        } finally {
+            lock.unlock();
         }
-        writeDirtyFrame(frames[idx]);
     }
 
     /** Flush every dirty frame in the pool. Used by checkpointing and shutdown. */
     public void flushAll() {
-        for (Frame f : frames) {
-            if (f.pageId != -1 && f.isDirty) {
-                writeDirtyFrame(f);
+        lock.lock();
+        try {
+            for (Frame f : frames) {
+                if (f.pageId != -1 && f.isDirty) {
+                    writeDirtyFrame(f);
+                }
             }
+        } finally {
+            lock.unlock();
         }
     }
 
     /**
      * Write a dirty frame to disk under the WAL rule, then mark it clean.
-     * Caller need not hold any lock (thread safety added in 2.5).
+     * Must be called while holding {@code lock}. Releases and reacquires the
+     * lock around the actual I/O so other threads are not blocked waiting.
      */
     private void writeDirtyFrame(Frame f) {
-        walFlushCallback.flushToLsn(f.page.getLsn());
-        diskManager.writePage(f.pageId, f.page);
+        long lsn = f.page.getLsn();
+        int fPageId = f.pageId;
+        Page fPage = f.page;
+
+        lock.unlock();
+        try {
+            walFlushCallback.flushToLsn(lsn);
+            diskManager.writePage(fPageId, fPage);
+        } finally {
+            lock.lock();
+        }
         f.isDirty = false;
     }
 
@@ -166,6 +236,9 @@ public final class BufferPool {
      * (clear the bit and continue). Evict the first unpinned frame with
      * {@code refBit=false}. A dirty victim is flushed (WAL rule) before the
      * frame is cleared and returned.
+     *
+     * <p>Must be called while holding {@code lock}. May release and reacquire
+     * it internally when flushing a dirty victim.
      *
      * @return the index of the evicted (now empty) frame
      * @throws StorageException if every frame is pinned
@@ -184,14 +257,18 @@ public final class BufferPool {
                 continue;
             }
 
-            // Victim found
+            // Victim found — claim it before any lock release
             clockHand = (idx + 1) % capacity;
+            int oldPageId = f.pageId;
 
-            if (f.isDirty && f.pageId != -1) {
-                writeDirtyFrame(f); // WAL rule enforced here
-            }
-            if (f.pageId != -1) {
-                pageTable.remove(f.pageId);
+            if (f.isDirty && oldPageId != -1) {
+                // Temporarily pin to prevent re-eviction during dirty flush I/O
+                f.pinCount = 1;
+                pageTable.remove(oldPageId);
+                writeDirtyFrame(f); // releases and reacquires lock
+                f.pinCount = 0;
+            } else if (oldPageId != -1) {
+                pageTable.remove(oldPageId);
             }
 
             // Reset to empty
