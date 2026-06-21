@@ -94,6 +94,10 @@ final class ExecFixture {
         return new ExecutionContext(txn, mvcc, catalog, heaps, indexes);
     }
 
+    QueryExecutor executor() {
+        return new QueryExecutor(catalog, bp, mvcc, heaps, indexes);
+    }
+
     /** Drain an operator into a list of rows (each row a list of values). */
     static List<List<Value>> drain(Operator op) {
         List<List<Value>> rows = new ArrayList<>();
