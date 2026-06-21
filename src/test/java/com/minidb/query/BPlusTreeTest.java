@@ -334,6 +334,73 @@ class BPlusTreeTest {
         assertEquals(100, scanChainInts(tree).size());
     }
 
+    // ---- 13.4: range scan ----------------------------------------------------
+
+    private static List<Integer> ridPages(List<RID> rids) {
+        List<Integer> out = new ArrayList<>();
+        for (RID r : rids) {
+            out.add(r.pageId());
+        }
+        return out;
+    }
+
+    @Test
+    void rangeScanInclusiveEndpoints() {
+        BufferPool bp = newPool(32);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT, 2);
+        for (int i = 0; i < 100; i++) {
+            tree.insert(Value.ofInt(i), new RID(i, 0));
+        }
+        List<RID> r = tree.rangeScan(Value.ofInt(20), Value.ofInt(30));
+        assertEquals(11, r.size());
+        assertEquals(20, r.get(0).pageId());
+        assertEquals(30, r.get(10).pageId());
+        // strictly ascending
+        for (int i = 1; i < r.size(); i++) {
+            assertTrue(r.get(i - 1).pageId() < r.get(i).pageId());
+        }
+    }
+
+    @Test
+    void rangeScanOpenBounds() {
+        BufferPool bp = newPool(32);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT, 3);
+        for (int i = 0; i < 50; i++) {
+            tree.insert(Value.ofInt(i), new RID(i, 0));
+        }
+        assertEquals(50, tree.rangeScan(null, null).size());
+        assertEquals(ridPages(tree.rangeScan(null, Value.ofInt(4))), List.of(0, 1, 2, 3, 4));
+        assertEquals(ridPages(tree.rangeScan(Value.ofInt(46), null)), List.of(46, 47, 48, 49));
+    }
+
+    @Test
+    void rangeScanMissingEndpointsAndEmpty() {
+        BufferPool bp = newPool(32);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT, 2);
+        for (int i = 0; i < 50; i += 2) { // only even keys
+            tree.insert(Value.ofInt(i), new RID(i, 0));
+        }
+        // [21,27] covers evens 22,24,26
+        assertEquals(List.of(22, 24, 26), ridPages(tree.rangeScan(Value.ofInt(21), Value.ofInt(27))));
+        // empty range (low > high) yields nothing
+        assertTrue(tree.rangeScan(Value.ofInt(30), Value.ofInt(20)).isEmpty());
+        // range entirely above the data
+        assertTrue(tree.rangeScan(Value.ofInt(100), Value.ofInt(200)).isEmpty());
+    }
+
+    @Test
+    void rangeScanReturnsDuplicates() {
+        BufferPool bp = newPool(32);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT, 2);
+        for (int i = 0; i < 8; i++) {
+            tree.insert(Value.ofInt(5), new RID(i, 0));
+        }
+        tree.insert(Value.ofInt(4), new RID(40, 0));
+        tree.insert(Value.ofInt(6), new RID(60, 0));
+        assertEquals(8, tree.rangeScan(Value.ofInt(5), Value.ofInt(5)).size());
+        assertEquals(10, tree.rangeScan(Value.ofInt(4), Value.ofInt(6)).size());
+    }
+
     @Test
     void defaultOrderFitsInAPage() {
         // 2*order entries at max key size must fit a node payload.
