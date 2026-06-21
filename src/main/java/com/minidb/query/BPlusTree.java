@@ -3,9 +3,14 @@ package com.minidb.query;
 import com.minidb.shared.ColumnType;
 import com.minidb.shared.Constants;
 import com.minidb.shared.RID;
+import com.minidb.shared.StorageException;
 import com.minidb.shared.Value;
 import com.minidb.storage.BufferPool;
 import com.minidb.storage.Page;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * A page-backed B+Tree index over a single column, giving O(log n) point lookup
@@ -180,6 +185,127 @@ public final class BPlusTree {
         return lo;
     }
 
+    // ---- 13.3: insert + splits ------------------------------------------------
+
+    /** A node overflows (must split) once it holds more than this many keys. */
+    private int maxKeys() {
+        return 2 * order;
+    }
+
+    /**
+     * Insert a {@code (key, RID)} entry, splitting nodes as needed and growing
+     * the tree's height when the root splits. Duplicate keys are allowed (the
+     * index column may not be unique); each maps to its own RID.
+     */
+    public void insert(Value key, RID rid) {
+        validateKey(key);
+        BTreeNode leaf = findLeaf(key);
+        int pos = lowerBound(leaf, key);
+        leaf.keys.add(pos, key);
+        leaf.rids.add(pos, rid);
+
+        if (leaf.keyCount() > maxKeys()) {
+            splitLeaf(leaf);
+        } else {
+            writeNode(leaf);
+        }
+    }
+
+    private void splitLeaf(BTreeNode leaf) {
+        int n = leaf.keyCount();
+        int mid = n / 2;
+
+        int rightId = allocatePage();
+        BTreeNode right = BTreeNode.newLeaf(keyType, rightId, leaf.parentPageId);
+        right.keys.addAll(new ArrayList<>(leaf.keys.subList(mid, n)));
+        right.rids.addAll(new ArrayList<>(leaf.rids.subList(mid, n)));
+        leaf.keys.subList(mid, n).clear();
+        leaf.rids.subList(mid, n).clear();
+
+        // Splice the new leaf into the leaf chain.
+        right.nextLeaf = leaf.nextLeaf;
+        leaf.nextLeaf = rightId;
+
+        Value separator = right.keys.get(0); // smallest of right is copied up
+        writeNode(leaf);
+        writeNode(right);
+        insertIntoParent(leaf, separator, right);
+    }
+
+    private void splitInner(BTreeNode node) {
+        int n = node.keyCount();
+        int mid = n / 2;
+        Value pushUp = node.keys.get(mid); // middle key moves up (not copied)
+
+        int rightId = allocatePage();
+        BTreeNode right = BTreeNode.newInner(keyType, rightId, node.parentPageId);
+        right.keys.addAll(new ArrayList<>(node.keys.subList(mid + 1, n)));
+        right.children.addAll(new ArrayList<>(node.children.subList(mid + 1, n + 1)));
+        node.keys.subList(mid, n).clear();
+        node.children.subList(mid + 1, n + 1).clear();
+
+        // The moved children now belong to the new right node.
+        reparent(right.children, rightId);
+
+        writeNode(node);
+        writeNode(right);
+        insertIntoParent(node, pushUp, right);
+    }
+
+    /**
+     * Insert {@code separator} (with {@code right} as the new child to the right
+     * of {@code left}) into {@code left}'s parent, creating a new root if
+     * {@code left} was the root.
+     */
+    private void insertIntoParent(BTreeNode left, Value separator, BTreeNode right) {
+        if (left.parentPageId == Constants.INVALID_PAGE_ID) {
+            int newRootId = allocatePage();
+            BTreeNode root = BTreeNode.newInner(keyType, newRootId, Constants.INVALID_PAGE_ID);
+            root.children.add(left.pageId);
+            root.keys.add(separator);
+            root.children.add(right.pageId);
+            left.parentPageId = newRootId;
+            right.parentPageId = newRootId;
+            writeNode(left);
+            writeNode(right);
+            writeNode(root);
+            rootPageId = newRootId;
+            return;
+        }
+
+        BTreeNode parent = readNode(left.parentPageId);
+        int leftIdx = parent.children.indexOf(left.pageId);
+        parent.keys.add(leftIdx, separator);
+        parent.children.add(leftIdx + 1, right.pageId);
+        right.parentPageId = parent.pageId;
+        writeNode(right);
+
+        if (parent.keyCount() > maxKeys()) {
+            splitInner(parent);
+        } else {
+            writeNode(parent);
+        }
+    }
+
+    /** Point each child page's parent pointer at {@code parentId}. */
+    private void reparent(List<Integer> children, int parentId) {
+        for (int childId : children) {
+            BTreeNode child = readNode(childId);
+            child.parentPageId = parentId;
+            writeNode(child);
+        }
+    }
+
+    private void validateKey(Value key) {
+        if (key == null || key.isNull()) {
+            throw new StorageException("B+Tree keys must be non-null");
+        }
+        if (keyType == ColumnType.VARCHAR
+                && key.asString().getBytes(StandardCharsets.UTF_8).length > MAX_VARCHAR_KEY_BYTES) {
+            throw new StorageException("VARCHAR key exceeds " + MAX_VARCHAR_KEY_BYTES + " bytes");
+        }
+    }
+
     // ---- Order sizing ---------------------------------------------------------
 
     /**
@@ -193,7 +319,9 @@ public final class BPlusTree {
         int maxLeafEntries = usable / (keyBytes + 2 * Integer.BYTES);     // key + RID(page,slot)
         int maxInnerKeys = (usable - Integer.BYTES) / (keyBytes + Integer.BYTES); // key + child, plus trailing child
         int maxKeys = Math.min(maxLeafEntries, maxInnerKeys);
-        return Math.max(maxKeys / 2, 2);
+        // order chosen so even the transient (2*order + 1)-key node during a
+        // split still fits within maxKeys entries.
+        return Math.max((maxKeys - 1) / 2, 2);
     }
 
     private static int maxKeyBytes(ColumnType keyType) {
