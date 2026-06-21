@@ -129,6 +129,72 @@ class BPlusTreeTest {
         assertTrue(reopened.readNode(rootId).leaf);
     }
 
+    // ---- 13.2: search --------------------------------------------------------
+
+    @Test
+    void searchOnEmptyTreeReturnsNull() {
+        BufferPool bp = newPool(8);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT);
+        assertNull(tree.search(Value.ofInt(1)));
+    }
+
+    @Test
+    void searchSingleLeaf() {
+        BufferPool bp = newPool(8);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT);
+        BTreeNode root = tree.readNode(tree.getRootPageId());
+        for (int k : new int[]{10, 20, 30}) {
+            root.keys.add(Value.ofInt(k));
+            root.rids.add(new RID(k, k));
+        }
+        tree.writeNode(root);
+
+        assertEquals(new RID(20, 20), tree.search(Value.ofInt(20)));
+        assertEquals(new RID(10, 10), tree.search(Value.ofInt(10)));
+        assertEquals(new RID(30, 30), tree.search(Value.ofInt(30)));
+        assertNull(tree.search(Value.ofInt(25)));
+        assertNull(tree.search(Value.ofInt(99)));
+    }
+
+    @Test
+    void searchTwoLevelTreeRouting() {
+        BufferPool bp = newPool(16);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT, 2);
+        int rootId = tree.getRootPageId();
+
+        // Build by hand: inner root [50] with left leaf {10,20} and right leaf {50,60}.
+        int leftId = tree.allocatePage();
+        int rightId = tree.allocatePage();
+
+        BTreeNode left = BTreeNode.newLeaf(ColumnType.INT, leftId, rootId);
+        left.keys.add(Value.ofInt(10));
+        left.rids.add(new RID(10, 0));
+        left.keys.add(Value.ofInt(20));
+        left.rids.add(new RID(20, 0));
+        left.nextLeaf = rightId;
+        tree.writeNode(left);
+
+        BTreeNode right = BTreeNode.newLeaf(ColumnType.INT, rightId, rootId);
+        right.keys.add(Value.ofInt(50));
+        right.rids.add(new RID(50, 0));
+        right.keys.add(Value.ofInt(60));
+        right.rids.add(new RID(60, 0));
+        tree.writeNode(right);
+
+        BTreeNode root = BTreeNode.newInner(ColumnType.INT, rootId, Constants.INVALID_PAGE_ID);
+        root.children.add(leftId);
+        root.keys.add(Value.ofInt(50));
+        root.children.add(rightId);
+        tree.writeNode(root);
+
+        assertEquals(new RID(10, 0), tree.search(Value.ofInt(10)));
+        assertEquals(new RID(20, 0), tree.search(Value.ofInt(20)));
+        assertEquals(new RID(50, 0), tree.search(Value.ofInt(50))); // boundary goes right
+        assertEquals(new RID(60, 0), tree.search(Value.ofInt(60)));
+        assertNull(tree.search(Value.ofInt(30)));
+        assertNull(tree.search(Value.ofInt(70)));
+    }
+
     @Test
     void defaultOrderFitsInAPage() {
         // 2*order entries at max key size must fit a node payload.
