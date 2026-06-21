@@ -179,6 +179,77 @@ class VacuumTest {
         assertArrayEquals(live, mvcc.getVisibleVersion(rid, 10L, snap));
     }
 
+    // ---- 11.3: physical heap reclamation + background scheduler --------------
+
+    @Test
+    void gcFreesHeapSlotForFullyDeadRow() {
+        com.minidb.storage.HeapFile heap = com.minidb.storage.HeapFile.create(bp);
+        RID rid = heap.insertTuple(new byte[]{7, 7, 7});
+        assertNotNull(heap.getTuple(rid)); // present before GC
+
+        addVersion(rid, 1L, 2L, -1L, new byte[]{7, 7, 7}); // head, deleted by 2
+        clog.setStatus(2L, TxStatus.COMMITTED);
+
+        Vacuum vac = new Vacuum(vs, clog, new TransactionManager(10L, wal, clog), heap::deleteTuple);
+        assertEquals(1, vac.runOnce());
+
+        assertNull(heap.getTuple(rid));            // heap slot physically freed
+        assertEquals(-1L, vs.getHeadVersionId(rid)); // RID no longer tracked
+    }
+
+    @Test
+    void gcDoesNotFreeHeapSlotForLiveRow() {
+        java.util.List<RID> freed = new java.util.ArrayList<>();
+        RID rid = new RID(8, 0);
+        addVersion(rid, 1L, 0L, -1L, new byte[]{1}); // live head
+
+        Vacuum vac = new Vacuum(vs, clog, new TransactionManager(10L, wal, clog), freed::add);
+        assertEquals(0, vac.runOnce());
+        assertTrue(freed.isEmpty());
+        assertNotEquals(-1L, vs.getHeadVersionId(rid)); // still tracked
+    }
+
+    @Test
+    void backgroundSchedulerReclaimsAutomatically() throws InterruptedException {
+        RID rid = new RID(9, 0);
+        long v = addVersion(rid, 1L, 2L, -1L, new byte[]{1});
+        clog.setStatus(2L, TxStatus.COMMITTED);
+
+        Vacuum vac = new Vacuum(vs, clog, new TransactionManager(10L, wal, clog));
+        vac.start(20L);
+        try {
+            assertTrue(vac.isRunning());
+            long deadline = System.nanoTime() + 3_000_000_000L;
+            while (vs.get(v) != null && System.nanoTime() < deadline) {
+                Thread.sleep(20L);
+            }
+            assertNull(vs.get(v), "background vacuum should have reclaimed the version");
+        } finally {
+            vac.stop();
+        }
+        assertFalse(vac.isRunning());
+    }
+
+    @Test
+    void longRunningTransactionHoldsTheHorizon() {
+        // A still-active transaction pins the horizon and prevents reclamation;
+        // once it commits, the version becomes collectable.
+        Transaction longRunner = tm.beginTransaction();  // xid 1, stays active
+        Transaction deleter = tm.beginTransaction();     // xid 2
+        tm.commitTransaction(deleter);                   // xid 2 committed
+
+        RID rid = new RID(10, 0);
+        long v = addVersion(rid, 1L, 2L, -1L, new byte[]{1});
+
+        // Horizon is 1 (longRunner active), so xmax=2 is not yet collectable.
+        assertEquals(0, vacuum.runOnce());
+        assertNotNull(vs.get(v));
+
+        tm.commitTransaction(longRunner); // horizon advances past xid 2
+        assertEquals(1, vacuum.runOnce());
+        assertNull(vs.get(v));
+    }
+
     @Test
     void horizonReflectsOldestActiveTransaction() {
         assertEquals(1L, vacuum.currentHorizon()); // nothing active → nextXid
