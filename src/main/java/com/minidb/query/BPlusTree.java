@@ -6,10 +6,13 @@ import com.minidb.shared.RID;
 import com.minidb.shared.StorageException;
 import com.minidb.shared.Value;
 import com.minidb.storage.BufferPool;
+import com.minidb.storage.HeapFile;
 import com.minidb.storage.Page;
+import com.minidb.storage.TupleCodec;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 
 /**
@@ -78,6 +81,32 @@ public final class BPlusTree {
 
     static BPlusTree open(BufferPool bufferPool, ColumnType keyType, int rootPageId, int order) {
         return new BPlusTree(bufferPool, keyType, rootPageId, order);
+    }
+
+    /**
+     * Bulk-build an index over one column by scanning a heap file (the
+     * {@code CREATE INDEX} path, {@code part2.md} §4.9). Each live tuple is
+     * decoded with {@link TupleCodec} against {@code rowSchema}, and its
+     * indexed-column value (when non-null) is inserted with the tuple's RID.
+     * NULL keys are skipped — they are not indexed. The caller registers the
+     * resulting {@link #getRootPageId()} in the catalog.
+     *
+     * @param rowSchema   column types of the table, in order
+     * @param columnIndex position of the indexed column within {@code rowSchema}
+     */
+    public static BPlusTree build(BufferPool bufferPool, HeapFile heap,
+                                  List<ColumnType> rowSchema, int columnIndex) {
+        ColumnType keyType = rowSchema.get(columnIndex);
+        BPlusTree tree = create(bufferPool, keyType);
+        Iterator<HeapFile.Entry> it = heap.scan();
+        while (it.hasNext()) {
+            HeapFile.Entry entry = it.next();
+            Value key = TupleCodec.decode(entry.data(), rowSchema).get(columnIndex);
+            if (key != null && !key.isNull()) {
+                tree.insert(key, entry.rid());
+            }
+        }
+        return tree;
     }
 
     /** The page id of the current root. Re-read after any structural change. */
