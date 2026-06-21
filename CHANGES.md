@@ -41,7 +41,7 @@ How to use it:
 Record cross-cutting decisions here as they are made. Seeded with the ones already fixed in the plan:
 
 - **Language/build:** Java 17, Maven, JUnit 5.
-- **PAGE_SIZE:** _to be fixed in sub-phase 0.2_ (choose 4096 or 8192 and record the value here).
+- **PAGE_SIZE:** fixed at **8192** bytes (`Constants.PAGE_SIZE`) in sub-phase 0.2. Matches PostgreSQL's default page size; never change for an existing database file.
 - **Version storage:** MVCC uses **Option B — separate Version Store** (heap stays MVCC-agnostic), per `part3.md` §6.2 and `implementation.md` Phase 10.
 - **Isolation default:** Snapshot Isolation (REPEATABLE READ semantics); READ COMMITTED via per-statement snapshots. SSI is out of scope.
 
@@ -62,5 +62,7 @@ Newest entries at the top. Format per entry:
 
 ### Phase 0 — Foundation  (branch: phase-00-foundation)
 - [2026-06-21] 0.1 — Maven project (Java 17 target, JUnit 5, surefire), package skeleton `com.minidb.{shared,storage,wal,txn,query}` via package-info, and a smoke test proving the harness runs. Files: `pom.xml`, `src/main/java/com/minidb/*/package-info.java`, `src/test/java/com/minidb/SmokeTest.java`.
+
+- [2026-06-21] 0.2 — Shared `Constants` (PAGE_SIZE=8192, sentinel XID/page/slot ids) and the `RID` record (pageId, slotId) with value equality and validity check. Files: `shared/Constants.java`, `shared/RID.java`, `test/.../shared/RidTest.java`.
 
 <!-- Add real phase work below this line as it is implemented. -->
