@@ -26,6 +26,9 @@ public final class BufferPool {
     /** Maps pageId &rarr; frame index for O(1) cache lookup. */
     private final Map<Integer, Integer> pageTable;
 
+    /** Clock hand: next candidate frame for eviction. */
+    private int clockHand = 0;
+
     /**
      * Create a buffer pool with the given capacity.
      *
@@ -54,9 +57,9 @@ public final class BufferPool {
 
     /**
      * Bring a page into the pool, pinning it. If the page is already in the
-     * pool, increment its pin count and return the cached page. If not, load
-     * it from disk into a free frame. The caller must call {@link #unpin} when
-     * done.
+     * pool, increment its pin count and return the cached page. If not, evict
+     * a victim frame via the Clock algorithm, load the page from disk, and
+     * return it pinned. The caller must call {@link #unpin} when done.
      */
     public Page fetchPage(int pageId) {
         Integer idx = pageTable.get(pageId);
@@ -67,19 +70,15 @@ public final class BufferPool {
             return f.page;
         }
 
-        // Cache miss — find a free frame (eviction added in 2.3)
-        int freeIdx = findFreeFrame();
-        if (freeIdx == -1) {
-            throw new StorageException(
-                    "buffer pool full: no free frame available (pool size " + frames.length + ")");
-        }
-        Frame f = frames[freeIdx];
+        // Cache miss — evict a victim frame via Clock
+        int victimIdx = evict();
+        Frame f = frames[victimIdx];
         f.page = diskManager.readPage(pageId);
         f.pageId = pageId;
         f.pinCount = 1;
         f.isDirty = false;
         f.refBit = true;
-        pageTable.put(pageId, freeIdx);
+        pageTable.put(pageId, victimIdx);
         return f.page;
     }
 
@@ -117,26 +116,61 @@ public final class BufferPool {
      */
     public Page newPage() {
         int newPageId = diskManager.allocatePage();
-        int freeIdx = findFreeFrame();
-        if (freeIdx == -1) {
-            throw new StorageException(
-                    "buffer pool full: no free frame for new page (pool size " + frames.length + ")");
-        }
-        Frame f = frames[freeIdx];
+        int victimIdx = evict();
+        Frame f = frames[victimIdx];
         f.page = diskManager.readPage(newPageId);
         f.pageId = newPageId;
         f.pinCount = 1;
         f.isDirty = false;
         f.refBit = true;
-        pageTable.put(newPageId, freeIdx);
+        pageTable.put(newPageId, victimIdx);
         return f.page;
     }
 
-    /** Scan for a frame with pageId == -1 (empty). Returns -1 if none found. */
-    private int findFreeFrame() {
-        for (int i = 0; i < frames.length; i++) {
-            if (frames[i].pageId == -1) return i;
+    /**
+     * Clock eviction: sweep the frame array starting at {@code clockHand},
+     * giving each unpinned frame with {@code refBit=true} a second chance
+     * (clear the bit and continue). Evict the first unpinned frame with
+     * {@code refBit=false}. Flush a dirty victim before evicting (WAL rule
+     * applied in 2.4; here we write directly).
+     *
+     * @return the index of the evicted (now empty) frame
+     * @throws StorageException if every frame is pinned
+     */
+    private int evict() {
+        int capacity = frames.length;
+        for (int i = 0; i < 2 * capacity; i++) {
+            int idx = (clockHand + i) % capacity;
+            Frame f = frames[idx];
+
+            if (f.pinCount > 0) {
+                continue; // cannot evict pinned frames
+            }
+            if (f.refBit) {
+                f.refBit = false; // second chance
+                continue;
+            }
+
+            // Victim found — evict it
+            clockHand = (idx + 1) % capacity;
+
+            if (f.isDirty && f.pageId != -1) {
+                // Flush dirty victim (WAL hook wired in 2.4; write directly for now)
+                diskManager.writePage(f.pageId, f.page);
+            }
+            if (f.pageId != -1) {
+                pageTable.remove(f.pageId);
+            }
+
+            // Reset to empty
+            f.pageId = -1;
+            f.page = null;
+            f.pinCount = 0;
+            f.isDirty = false;
+            f.refBit = false;
+            return idx;
         }
-        return -1;
+        throw new StorageException(
+                "buffer pool exhausted: all " + capacity + " frames are pinned");
     }
 }
