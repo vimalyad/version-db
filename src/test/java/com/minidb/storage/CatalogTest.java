@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.minidb.shared.ColumnDef;
 import com.minidb.shared.ColumnMeta;
 import com.minidb.shared.ColumnType;
+import com.minidb.shared.IndexMeta;
 import com.minidb.shared.StorageException;
 import com.minidb.shared.TableMeta;
 
@@ -138,6 +139,68 @@ class CatalogTest {
             assertEquals("id", columns.get(0).columnName());
             assertEquals("name", columns.get(1).columnName());
             assertEquals("active", columns.get(2).columnName());
+        }
+    }
+
+    @Test
+    void registeredIndexIsVisibleToGetIndexes() {
+        try (DiskManager dm = new DiskManager(tmp.resolve("j.db"))) {
+            Catalog catalog = new Catalog(pool(dm), dm);
+            TableMeta t = catalog.createTable("users", usersSchema());
+            IndexMeta idx = catalog.registerIndex(t.tableId(), "id", 42);
+
+            List<IndexMeta> indexes = catalog.getIndexes(t.tableId());
+            assertEquals(1, indexes.size());
+            assertEquals(idx, indexes.get(0));
+            assertEquals("id", indexes.get(0).columnName());
+            assertEquals(42, indexes.get(0).rootPageId());
+        }
+    }
+
+    @Test
+    void tableWithoutIndexesReturnsEmptyList() {
+        try (DiskManager dm = new DiskManager(tmp.resolve("k.db"))) {
+            Catalog catalog = new Catalog(pool(dm), dm);
+            TableMeta t = catalog.createTable("users", usersSchema());
+            assertTrue(catalog.getIndexes(t.tableId()).isEmpty());
+        }
+    }
+
+    @Test
+    void indexesSurviveReopen() {
+        Path path = tmp.resolve("l.db");
+        int tableId;
+        try (DiskManager dm = new DiskManager(path)) {
+            BufferPool bp = pool(dm);
+            Catalog catalog = new Catalog(bp, dm);
+            tableId = catalog.createTable("users", usersSchema()).tableId();
+            catalog.registerIndex(tableId, "id", 7);
+            catalog.registerIndex(tableId, "name", 8);
+            bp.flushAll();
+        }
+        try (DiskManager dm = new DiskManager(path)) {
+            Catalog catalog = new Catalog(pool(dm), dm);
+            List<IndexMeta> indexes = catalog.getIndexes(tableId);
+            assertEquals(2, indexes.size());
+        }
+    }
+
+    @Test
+    void indexIdsDoNotCollideAfterReopen() {
+        Path path = tmp.resolve("m.db");
+        int firstIndexId;
+        try (DiskManager dm = new DiskManager(path)) {
+            BufferPool bp = pool(dm);
+            Catalog catalog = new Catalog(bp, dm);
+            int tableId = catalog.createTable("users", usersSchema()).tableId();
+            firstIndexId = catalog.registerIndex(tableId, "id", 7).indexId();
+            bp.flushAll();
+        }
+        try (DiskManager dm = new DiskManager(path)) {
+            Catalog catalog = new Catalog(pool(dm), dm);
+            int tableId = catalog.getTable("users").tableId();
+            IndexMeta second = catalog.registerIndex(tableId, "name", 8);
+            assertNotEquals(firstIndexId, second.indexId());
         }
     }
 
