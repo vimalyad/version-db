@@ -17,7 +17,7 @@ How to use it:
 | Phase | Branch | Owner | Status |
 |---|---|---|---|
 | 0 — Foundation | `phase-00-foundation` | shared | done |
-| 1 — Page & DiskManager | `phase-01-storage-page` | M1 | not started |
+| 1 — Page & DiskManager | `phase-01-storage-page` | M1 | in progress |
 | 2 — Buffer Pool | `phase-02-bufferpool` | M1 | not started |
 | 3 — Heap File | `phase-03-heapfile` | M1 | not started |
 | 4 — Catalog | `phase-04-catalog` | M1 | not started |
@@ -69,5 +69,8 @@ Newest entries at the top. Format per entry:
 
 - [2026-06-21] 0.4 — Metadata records: `TableMeta`, `ColumnMeta`, `IndexMeta`, `ColumnStats`, and `TableStats` (defensively-copied, unmodifiable column-stats map). Files: `shared/TableMeta.java`, `shared/ColumnMeta.java`, `shared/IndexMeta.java`, `shared/ColumnStats.java`, `shared/TableStats.java`, `test/.../shared/MetadataTest.java`.
 - [2026-06-21] 0.5 — Exception hierarchy: `MiniDbException` (unchecked base) with `StorageException`, `ParseException`, `SerializationException`, `TransactionConflictException`. Files: `shared/MiniDbException.java` + the four subclasses, `test/.../shared/ExceptionTest.java`. **Phase 0 complete** (17 tests green).
+
+### Phase 1 — Page & DiskManager  (branch: phase-01-storage-page)
+- [2026-06-21] 1.1 — `storage/Page`: fixed 32-byte header (pageId, lsn, freeSpaceStart, freeSpaceEnd, numSlots, nextPageId, checksum) over a single PAGE_SIZE backing array; `create`, header accessors, `setLsn`/`setNextPageId`, `serialize`/`deserialize` with byte-for-byte round-trip. Files: `storage/Page.java`, `test/.../storage/PageTest.java`.
 
 <!-- Add real phase work below this line as it is implemented. -->
