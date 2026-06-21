@@ -1,6 +1,6 @@
-# MiniDB
+# VersionDB
 
-A single-node relational database engine built from scratch in **Java 17**. MiniDB
+A single-node relational database engine built from scratch in **Java 17**. VersionDB
 implements the core of a real database — a disk-backed storage engine, write-ahead
 logging with ARIES crash recovery, PostgreSQL-style multi-version concurrency
 control (MVCC), a SQL parser, a B+Tree index, a cost-based optimizer, and a
@@ -34,35 +34,35 @@ mvn compile      # build
 mvn test         # run the full JUnit 5 test suite
 ```
 
-## Using MiniDB
+## Using VersionDB
 
 ### As an interactive SQL shell (REPL)
 
 ```bash
 mvn -q compile
-java -cp target/classes com.minidb.tools.MiniDbCli mydata
+java -cp target/classes com.versiondb.tools.VersionDbCli mydata
 ```
 
 `mydata` is the directory the database files live in; it is created on first run and
 reopened (with crash recovery) on subsequent runs. Example session:
 
 ```
-MiniDB ready. End statements with ';'. Type 'exit' to quit.
-minidb> CREATE TABLE users (id INT, name VARCHAR);
+VersionDB ready. End statements with ';'. Type 'exit' to quit.
+versiondb> CREATE TABLE users (id INT, name VARCHAR);
 OK, 0 row(s) affected
-minidb> INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob');
+versiondb> INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob');
 OK, 2 row(s) affected
-minidb> SELECT id, name FROM users WHERE id = 1;
+versiondb> SELECT id, name FROM users WHERE id = 1;
 id | name
 1 | Alice
 (1 row(s))
-minidb> BEGIN;
+versiondb> BEGIN;
 BEGIN
-minidb> UPDATE users SET name = 'Carol' WHERE id = 2;
+versiondb> UPDATE users SET name = 'Carol' WHERE id = 2;
 OK, 1 row(s) affected
-minidb> COMMIT;
+versiondb> COMMIT;
 COMMIT
-minidb> exit
+versiondb> exit
 ```
 
 Each statement runs in **autocommit** mode unless wrapped in an explicit
@@ -71,12 +71,12 @@ Each statement runs in **autocommit** mode unless wrapped in an explicit
 ### As an embedded library
 
 ```java
-import com.minidb.tools.MiniDb;
-import com.minidb.query.exec.ResultSet;
-import com.minidb.txn.Transaction;
+import com.versiondb.tools.VersionDb;
+import com.versiondb.query.exec.ResultSet;
+import com.versiondb.txn.Transaction;
 import java.nio.file.Path;
 
-try (MiniDb db = MiniDb.open(Path.of("mydata"))) {
+try (VersionDb db = VersionDb.open(Path.of("mydata"))) {
     db.execute("CREATE TABLE users (id INT, name VARCHAR)");
     db.execute("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')");
 
@@ -93,7 +93,7 @@ try (MiniDb db = MiniDb.open(Path.of("mydata"))) {
 }
 ```
 
-`MiniDb.open` starts a background vacuum thread; `close()` performs a clean shutdown
+`VersionDb.open` starts a background vacuum thread; `close()` performs a clean shutdown
 (flushing buffered pages). A `ResultSet` provides `columns()`, `rows()`
 (`List<List<Value>>`), `affectedRows()`, and `size()`; a `Value` provides
 `asInt()`, `asFloat()`, `asString()`, `asBool()`, and `isNull()`.
@@ -125,16 +125,16 @@ DELETE FROM t WHERE id = 2;
 
 ## Architecture
 
-MiniDB is organized in layers, each behind a clear interface:
+VersionDB is organized in layers, each behind a clear interface:
 
 | Package | Responsibility |
 |---|---|
-| `com.minidb.shared` | Shared value types: `RID`, `Value`, `ColumnType`, metadata records, exceptions. |
-| `com.minidb.storage` | `Page`, `DiskManager`, `BufferPool`, `HeapFile`, `Catalog`, `TupleCodec`. |
-| `com.minidb.wal` | `WALManager`, `LogRecord`, and the ARIES `RecoveryManager`. |
-| `com.minidb.txn` | `TransactionManager`, `SnapshotManager`, `MVCCManager`, `VersionStore`, `CommitLog`, `Vacuum`. |
-| `com.minidb.query` | SQL `Lexer`/`Parser`, the `ast` nodes, `BPlusTree`, the `Optimizer`, and the `exec` (Volcano) operators + `QueryExecutor`. |
-| `com.minidb.tools` | `MiniDb` (the assembled engine) and `MiniDbCli` (the REPL). |
+| `com.versiondb.shared` | Shared value types: `RID`, `Value`, `ColumnType`, metadata records, exceptions. |
+| `com.versiondb.storage` | `Page`, `DiskManager`, `BufferPool`, `HeapFile`, `Catalog`, `TupleCodec`. |
+| `com.versiondb.wal` | `WALManager`, `LogRecord`, and the ARIES `RecoveryManager`. |
+| `com.versiondb.txn` | `TransactionManager`, `SnapshotManager`, `MVCCManager`, `VersionStore`, `CommitLog`, `Vacuum`. |
+| `com.versiondb.query` | SQL `Lexer`/`Parser`, the `ast` nodes, `BPlusTree`, the `Optimizer`, and the `exec` (Volcano) operators + `QueryExecutor`. |
+| `com.versiondb.tools` | `VersionDb` (the assembled engine) and `VersionDbCli` (the REPL). |
 
 A write goes through the buffer pool and is logged to the WAL before its page can be
 flushed (the WAL rule); MVCC records the tuple version with its creating/deleting
