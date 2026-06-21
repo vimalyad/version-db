@@ -47,4 +47,14 @@ class HeapFileTest {
         assertEquals(1, reopened.getPageCount());
         assertEquals(firstPageId, reopened.getFirstPageId());
     }
+
+    @Test
+    void freeSpaceMapTracksEmptyFirstPage() {
+        BufferPool bp = newPool(8);
+        HeapFile heap = HeapFile.create(bp);
+
+        int emptyPageFree = Page.create(0).getFreeSpace();
+        assertEquals(emptyPageFree, heap.freeSpaceOf(heap.getFirstPageId()));
+        assertEquals(-1, heap.freeSpaceOf(9999)); // unknown page
+    }
 }

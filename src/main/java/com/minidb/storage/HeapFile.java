@@ -3,7 +3,9 @@ package com.minidb.storage;
 import com.minidb.shared.Constants;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * An unordered collection of tuples for one table, stored as a singly-linked
@@ -22,6 +24,16 @@ public final class HeapFile {
 
     /** Page ids in chain order, rebuilt on open and extended as pages are added. */
     private final List<Integer> pageIds = new ArrayList<>();
+
+    /**
+     * Free Space Map: pageId &rarr; bytes available for the next insert on that
+     * page (as reported by {@link Page#getFreeSpace()}, which already accounts
+     * for the slot entry a new tuple needs). Rebuilt on open and kept current as
+     * tuples are inserted, so an insert can pick a page in O(pages) without
+     * scanning page contents. Note: a delete tombstones a slot but does not
+     * reclaim space, so deletes leave free space unchanged.
+     */
+    private final Map<Integer, Integer> freeSpaceMap = new HashMap<>();
 
     /** Tail of the chain — where a newly allocated page is appended. */
     private int lastPageId;
@@ -60,15 +72,20 @@ public final class HeapFile {
         return pageIds.size();
     }
 
-    /** Walk the chain from {@code firstPageId}, (re)populating the page list. */
+    /**
+     * Walk the chain from {@code firstPageId}, (re)populating the page list and
+     * the free space map.
+     */
     private void rebuild() {
         pageIds.clear();
+        freeSpaceMap.clear();
         int current = firstPageId;
         while (current != Constants.INVALID_PAGE_ID) {
             Page page = bufferPool.fetchPage(current);
             int next;
             try {
                 pageIds.add(current);
+                freeSpaceMap.put(current, page.getFreeSpace());
                 next = page.getNextPageId();
             } finally {
                 bufferPool.unpin(current, false);
@@ -76,5 +93,10 @@ public final class HeapFile {
             lastPageId = current;
             current = next;
         }
+    }
+
+    /** Free bytes available for the next insert on {@code pageId}, or -1 if unknown. */
+    int freeSpaceOf(int pageId) {
+        return freeSpaceMap.getOrDefault(pageId, -1);
     }
 }
