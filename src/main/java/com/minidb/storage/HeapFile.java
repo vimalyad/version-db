@@ -1,6 +1,8 @@
 package com.minidb.storage;
 
 import com.minidb.shared.Constants;
+import com.minidb.shared.RID;
+import com.minidb.shared.StorageException;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -18,6 +20,9 @@ import java.util.Map;
  * touches the disk directly.
  */
 public final class HeapFile {
+
+    /** Largest tuple that can ever fit on a page (an empty page's free space). */
+    static final int MAX_TUPLE_SIZE = Constants.PAGE_SIZE - Page.HEADER_SIZE - Page.SLOT_SIZE;
 
     private final BufferPool bufferPool;
     private final int firstPageId;
@@ -98,5 +103,93 @@ public final class HeapFile {
     /** Free bytes available for the next insert on {@code pageId}, or -1 if unknown. */
     int freeSpaceOf(int pageId) {
         return freeSpaceMap.getOrDefault(pageId, -1);
+    }
+
+    // ---- Tuple operations -----------------------------------------------------
+
+    /**
+     * Insert a tuple into the heap. Uses the free space map to find a page with
+     * room; if none has space, allocates a new page and links it onto the chain.
+     *
+     * @return the RID where the tuple was stored
+     * @throws StorageException if the tuple is larger than a page can ever hold
+     */
+    public synchronized RID insertTuple(byte[] data) {
+        if (data.length > MAX_TUPLE_SIZE) {
+            throw new StorageException("tuple of " + data.length
+                    + " bytes exceeds maximum tuple size " + MAX_TUPLE_SIZE);
+        }
+        int targetPageId = findPageWithSpace(data.length);
+        if (targetPageId == Constants.INVALID_PAGE_ID) {
+            targetPageId = appendNewPage();
+        }
+        Page page = bufferPool.fetchPage(targetPageId);
+        int slotId;
+        try {
+            slotId = page.insertTuple(data);
+            freeSpaceMap.put(targetPageId, page.getFreeSpace());
+        } finally {
+            bufferPool.unpin(targetPageId, true);
+        }
+        return new RID(targetPageId, slotId);
+    }
+
+    /**
+     * Read the tuple at the given RID.
+     *
+     * @return the tuple bytes, or {@code null} if the slot has been deleted
+     */
+    public byte[] getTuple(RID rid) {
+        Page page = bufferPool.fetchPage(rid.pageId());
+        try {
+            return page.getTuple(rid.slotId());
+        } finally {
+            bufferPool.unpin(rid.pageId(), false);
+        }
+    }
+
+    /**
+     * Delete the tuple at the given RID. The slot is tombstoned; the bytes stay
+     * physically in place (MVCC version chains may still reach them) and the
+     * space is reclaimed later by garbage collection, not here.
+     */
+    public synchronized void deleteTuple(RID rid) {
+        Page page = bufferPool.fetchPage(rid.pageId());
+        try {
+            page.deleteTuple(rid.slotId());
+        } finally {
+            bufferPool.unpin(rid.pageId(), true);
+        }
+    }
+
+    /** First page in the chain with at least {@code len} free bytes, or INVALID_PAGE_ID. */
+    private int findPageWithSpace(int len) {
+        for (int pid : pageIds) {
+            Integer free = freeSpaceMap.get(pid);
+            if (free != null && free >= len) {
+                return pid;
+            }
+        }
+        return Constants.INVALID_PAGE_ID;
+    }
+
+    /** Allocate a new page, link it onto the tail of the chain, and register it. */
+    private int appendNewPage() {
+        Page newPage = bufferPool.newPage();
+        int newPid = newPage.getPageId();
+        int free = newPage.getFreeSpace();
+        bufferPool.unpin(newPid, false);
+
+        Page tail = bufferPool.fetchPage(lastPageId);
+        try {
+            tail.setNextPageId(newPid);
+        } finally {
+            bufferPool.unpin(lastPageId, true);
+        }
+
+        pageIds.add(newPid);
+        freeSpaceMap.put(newPid, free);
+        lastPageId = newPid;
+        return newPid;
     }
 }
