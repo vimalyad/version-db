@@ -1,5 +1,6 @@
 package com.minidb.storage;
 
+import com.minidb.shared.StorageException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -127,6 +128,65 @@ class BufferPoolTest {
         Frame f = findFrame(pool, page.getPageId());
         assertNotNull(f);
         assertEquals(1, f.pinCount);
+    }
+
+    // ---- 2.3: Clock eviction -------------------------------------------------
+
+    @Test
+    void evictionSkipsPinnedFrames() {
+        int p0 = diskManager.allocatePage();
+        int p1 = diskManager.allocatePage();
+        int p2 = diskManager.allocatePage();
+        int p3 = diskManager.allocatePage();
+        BufferPool pool = new BufferPool(3, diskManager, noOpWal);
+        pool.fetchPage(p0);
+        pool.fetchPage(p1);
+        pool.fetchPage(p2);
+        // All 3 frames pinned — fetching a 4th must throw
+        assertThrows(StorageException.class, () -> pool.fetchPage(p3));
+    }
+
+    @Test
+    void evictionRespectsSecondChance() {
+        int p0 = diskManager.allocatePage();
+        int p1 = diskManager.allocatePage();
+        int p2 = diskManager.allocatePage();
+        BufferPool pool = new BufferPool(2, diskManager, noOpWal);
+        pool.fetchPage(p0);
+        pool.fetchPage(p1);
+        // p1 stays pinned, p0 unpinned — p0 must be evicted (after second-chance clear)
+        pool.unpin(p0, false);
+        Page p2Page = pool.fetchPage(p2);
+        assertNotNull(p2Page);
+        assertNull(findFrame(pool, p0));  // p0 evicted
+        assertNotNull(findFrame(pool, p1)); // p1 still present
+    }
+
+    @Test
+    void cleanEvictionRemovesFromPageTable() {
+        int p0 = diskManager.allocatePage();
+        int p1 = diskManager.allocatePage();
+        BufferPool pool = new BufferPool(1, diskManager, noOpWal);
+        pool.fetchPage(p0);
+        pool.unpin(p0, false);
+        pool.fetchPage(p1);
+        assertNull(findFrame(pool, p0));
+    }
+
+    @Test
+    void dirtyVictimFlushedBeforeEviction() {
+        int p0 = diskManager.allocatePage();
+        int p1 = diskManager.allocatePage();
+        BufferPool pool = new BufferPool(1, diskManager, noOpWal);
+        Page page = pool.fetchPage(p0);
+        byte[] payload = new byte[]{1, 2, 3};
+        page.insertTuple(payload);
+        pool.unpin(p0, true);
+
+        pool.fetchPage(p1); // triggers eviction of dirty p0
+
+        Page reread = diskManager.readPage(p0);
+        assertArrayEquals(payload, reread.getTuple(0));
     }
 
     // ---- helpers -------------------------------------------------------------
