@@ -128,11 +128,44 @@ public final class BufferPool {
     }
 
     /**
+     * Flush a dirty page to disk, honouring the WAL rule: call
+     * {@code walFlushCallback.flushToLsn(page.lsn)} before writing the page so
+     * that all WAL records describing changes to this page are durable first.
+     * No-op if the page is not in the pool or is not dirty.
+     */
+    public void flushPage(int pageId) {
+        Integer idx = pageTable.get(pageId);
+        if (idx == null || !frames[idx].isDirty) {
+            return;
+        }
+        writeDirtyFrame(frames[idx]);
+    }
+
+    /** Flush every dirty frame in the pool. Used by checkpointing and shutdown. */
+    public void flushAll() {
+        for (Frame f : frames) {
+            if (f.pageId != -1 && f.isDirty) {
+                writeDirtyFrame(f);
+            }
+        }
+    }
+
+    /**
+     * Write a dirty frame to disk under the WAL rule, then mark it clean.
+     * Caller need not hold any lock (thread safety added in 2.5).
+     */
+    private void writeDirtyFrame(Frame f) {
+        walFlushCallback.flushToLsn(f.page.getLsn());
+        diskManager.writePage(f.pageId, f.page);
+        f.isDirty = false;
+    }
+
+    /**
      * Clock eviction: sweep the frame array starting at {@code clockHand},
      * giving each unpinned frame with {@code refBit=true} a second chance
      * (clear the bit and continue). Evict the first unpinned frame with
-     * {@code refBit=false}. Flush a dirty victim before evicting (WAL rule
-     * applied in 2.4; here we write directly).
+     * {@code refBit=false}. A dirty victim is flushed (WAL rule) before the
+     * frame is cleared and returned.
      *
      * @return the index of the evicted (now empty) frame
      * @throws StorageException if every frame is pinned
@@ -151,12 +184,11 @@ public final class BufferPool {
                 continue;
             }
 
-            // Victim found — evict it
+            // Victim found
             clockHand = (idx + 1) % capacity;
 
             if (f.isDirty && f.pageId != -1) {
-                // Flush dirty victim (WAL hook wired in 2.4; write directly for now)
-                diskManager.writePage(f.pageId, f.page);
+                writeDirtyFrame(f); // WAL rule enforced here
             }
             if (f.pageId != -1) {
                 pageTable.remove(f.pageId);
