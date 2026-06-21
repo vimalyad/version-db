@@ -26,9 +26,11 @@ public final class Tuple {
         if (tables.size() != columns.size() || columns.size() != values.size()) {
             throw new IllegalArgumentException("tuple tables/columns/values length mismatch");
         }
-        this.tables = List.copyOf(tables);
-        this.columns = List.copyOf(columns);
-        this.values = new ArrayList<>(values); // values may legitimately contain null (SQL NULL)
+        // Defensive copies via ArrayList (not List.copyOf): a column's table tag
+        // may be null (computed/aliased columns) and values may be SQL NULL.
+        this.tables = new ArrayList<>(tables);
+        this.columns = new ArrayList<>(columns);
+        this.values = new ArrayList<>(values);
     }
 
     public int size() {
