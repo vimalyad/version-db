@@ -65,4 +65,6 @@ Newest entries at the top. Format per entry:
 
 - [2026-06-21] 0.2 — Shared `Constants` (PAGE_SIZE=8192, sentinel XID/page/slot ids) and the `RID` record (pageId, slotId) with value equality and validity check. Files: `shared/Constants.java`, `shared/RID.java`, `test/.../shared/RidTest.java`.
 
+- [2026-06-21] 0.3 — `ColumnType` enum (INT/FLOAT/VARCHAR/BOOL), immutable `Value` (typed value or typed NULL with checked accessors), and `ColumnDef` record (name, type, nullable). Files: `shared/ColumnType.java`, `shared/Value.java`, `shared/ColumnDef.java`, `test/.../shared/ValueTest.java`.
+
 <!-- Add real phase work below this line as it is implemented. -->
