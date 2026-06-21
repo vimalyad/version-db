@@ -27,7 +27,7 @@ How to use it:
 | 8 — Transaction Manager | `phase-08-txnmgr` | M3 | done |
 | 9 — Snapshot Manager | `phase-09-snapshot` | M3 | done |
 | 10 — MVCC Manager | `phase-10-mvcc` | M3 | done |
-| 11 — Vacuum / GC | `phase-11-vacuum` | M3 | not started |
+| 11 — Vacuum / GC | `phase-11-vacuum` | M3 | in progress |
 | 12 — SQL Parser | `phase-12-parser` | M2 | not started |
 | 13 — B+Tree Index | `phase-13-btree` | M2 | not started |
 | 14 — Optimizer | `phase-14-optimizer` | M2 | not started |
@@ -141,3 +141,6 @@ Newest entries at the top. Format per entry:
 - [2026-06-21] 10.6 — `update(txn, heapFile, oldRid, newData)`: under stripe lock for oldRid — conflict check → stamp `xmax=txn.xid` + undo-log + WAL delete; then `heapFile.insertTuple` for newData → new independent chain (`prevVersionId=-1`) → undo-log(null) + WAL insert + `setLsn`. **Deviation from design doc:** new version's chain is NOT linked to the old version's chain via `prevVersionId`; keeping chains per-RID prevents old readers scanning `newRid` from seeing old-version data through cross-chain traversal. Files: `txn/MVCCManager.java`.
 - [2026-06-21] 10.7 — `undoCallback()`: INSERT undo sets `version.xmin=0` (aborted-insert sentinel, permanently invisible); DELETE/UPDATE undo sets `version.xmax=0` (restore live). Wired into `TransactionManager.setUndoCallback(mvcc.undoCallback())` so `abortTransaction` applies in-memory undo before logging ABORT. Files: `txn/MVCCManager.java`.
 - [2026-06-21] 10.8 — Per-RID striped `ReentrantLock` pool (1024 stripes, hash by `RID.hashCode() % STRIPE_COUNT`) guards chain-head reads/writes and xmax stamping inside `delete`, `update`, and `undoCallback`. Files: `txn/MVCCManager.java`, `test/.../txn/MVCCManagerTest.java`. **Phase 10 complete** (200 tests green).
+
+### Phase 11 — Vacuum / GC  (branch: phase-11-vacuum)
+- [2026-06-21] 11.1 — `txn/Vacuum`: the reclaim predicate `isReclaimable(version, horizon)` = `xmax != 0 AND xmax < horizon AND CommitLog.isCommitted(xmax)` (per `part3.md` §8.2) plus `currentHorizon()` delegating to `TransactionManager.getOldestActiveXid()`. A live head (`xmax==0`), a deleter at/after the horizon, and an uncommitted/aborted deleter are all kept. Added `VersionStore.chainHeadsSnapshot()` (read-locked copy of the `RID→headVersionId` map) so the upcoming sweep can iterate every chain without holding the store lock. Files: `txn/Vacuum.java`, `txn/VersionStore.java`, `test/.../txn/VacuumTest.java`.
