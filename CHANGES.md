@@ -16,7 +16,7 @@ How to use it:
 
 | Phase | Branch | Owner | Status |
 |---|---|---|---|
-| 0 — Foundation | `phase-00-foundation` | shared | in progress |
+| 0 — Foundation | `phase-00-foundation` | shared | done |
 | 1 — Page & DiskManager | `phase-01-storage-page` | M1 | not started |
 | 2 — Buffer Pool | `phase-02-bufferpool` | M1 | not started |
 | 3 — Heap File | `phase-03-heapfile` | M1 | not started |
@@ -68,5 +68,6 @@ Newest entries at the top. Format per entry:
 - [2026-06-21] 0.3 — `ColumnType` enum (INT/FLOAT/VARCHAR/BOOL), immutable `Value` (typed value or typed NULL with checked accessors), and `ColumnDef` record (name, type, nullable). Files: `shared/ColumnType.java`, `shared/Value.java`, `shared/ColumnDef.java`, `test/.../shared/ValueTest.java`.
 
 - [2026-06-21] 0.4 — Metadata records: `TableMeta`, `ColumnMeta`, `IndexMeta`, `ColumnStats`, and `TableStats` (defensively-copied, unmodifiable column-stats map). Files: `shared/TableMeta.java`, `shared/ColumnMeta.java`, `shared/IndexMeta.java`, `shared/ColumnStats.java`, `shared/TableStats.java`, `test/.../shared/MetadataTest.java`.
+- [2026-06-21] 0.5 — Exception hierarchy: `MiniDbException` (unchecked base) with `StorageException`, `ParseException`, `SerializationException`, `TransactionConflictException`. Files: `shared/MiniDbException.java` + the four subclasses, `test/.../shared/ExceptionTest.java`. **Phase 0 complete** (17 tests green).
 
 <!-- Add real phase work below this line as it is implemented. -->
