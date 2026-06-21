@@ -16,7 +16,7 @@ How to use it:
 
 | Phase | Branch | Owner | Status |
 |---|---|---|---|
-| 0 — Foundation | `phase-00-foundation` | shared | not started |
+| 0 — Foundation | `phase-00-foundation` | shared | in progress |
 | 1 — Page & DiskManager | `phase-01-storage-page` | M1 | not started |
 | 2 — Buffer Pool | `phase-02-bufferpool` | M1 | not started |
 | 3 — Heap File | `phase-03-heapfile` | M1 | not started |
@@ -59,5 +59,8 @@ Newest entries at the top. Format per entry:
 ### Project setup  (no branch / planning)
 - [2026-06-21] Added architecture design docs `part1.md`, `part2.md`, `part3.md` (Member 1 Storage & Recovery, Member 2 Query & Indexing, Member 3 Transactions & MVCC).
 - [2026-06-21] Added coordination files: `CLAUDE.md` (project context + workflow + attribution rule), `implementation.md` (16-phase build plan), `CHANGES.md` (this file).
+
+### Phase 0 — Foundation  (branch: phase-00-foundation)
+- [2026-06-21] 0.1 — Maven project (Java 17 target, JUnit 5, surefire), package skeleton `com.minidb.{shared,storage,wal,txn,query}` via package-info, and a smoke test proving the harness runs. Files: `pom.xml`, `src/main/java/com/minidb/*/package-info.java`, `src/test/java/com/minidb/SmokeTest.java`.
 
 <!-- Add real phase work below this line as it is implemented. -->
