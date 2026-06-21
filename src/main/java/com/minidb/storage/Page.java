@@ -185,6 +185,46 @@ public final class Page {
         return HEADER_SIZE + slotId * SLOT_SIZE;
     }
 
+    /**
+     * Recovery-only: (re)place a tuple at a specific slot id. Used by redo, to
+     * recreate an insert at the exact slot recorded in the WAL, and by undo, to
+     * restore a deleted tuple — both must preserve the tuple's original RID,
+     * which {@link #insertTuple} (which always appends) cannot guarantee.
+     *
+     * <p>If {@code slotId == numSlots} the slot array grows by one (an append);
+     * if {@code slotId < numSlots} the existing slot is repointed at freshly
+     * written bytes (its previous bytes are abandoned and reclaimed later by GC).
+     * A gap ({@code slotId > numSlots}) is rejected.
+     *
+     * @throws StorageException if the slot id leaves a gap or the tuple does not fit
+     */
+    public void putTupleAtSlot(int slotId, byte[] tuple) {
+        int numSlots = getNumSlots();
+        if (slotId < 0 || slotId > numSlots) {
+            throw new StorageException("redo slot id " + slotId + " leaves a gap on page "
+                    + getPageId() + " (numSlots " + numSlots + ")");
+        }
+        boolean appending = (slotId == numSlots);
+        int needed = tuple.length + (appending ? SLOT_SIZE : 0);
+        int available = getFreeSpaceEnd() - getFreeSpaceStart();
+        if (needed > available) {
+            throw new StorageException("redo tuple of " + tuple.length
+                    + " bytes does not fit on page " + getPageId() + " (available " + available + ")");
+        }
+
+        int newDataOffset = getFreeSpaceEnd() - tuple.length;
+        System.arraycopy(tuple, 0, data, newDataOffset, tuple.length);
+
+        int slotPos = HEADER_SIZE + slotId * SLOT_SIZE;
+        buf.putInt(slotPos, newDataOffset);
+        buf.putInt(slotPos + 4, tuple.length);
+        buf.putInt(OFF_FREE_SPACE_END, newDataOffset);
+        if (appending) {
+            buf.putInt(OFF_FREE_SPACE_START, slotPos + SLOT_SIZE);
+            buf.putInt(OFF_NUM_SLOTS, numSlots + 1);
+        }
+    }
+
     // ---- Serialization --------------------------------------------------------
 
     /**
