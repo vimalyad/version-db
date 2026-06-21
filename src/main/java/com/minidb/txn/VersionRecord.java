@@ -37,10 +37,17 @@ public final class VersionRecord {
     public final RID rid;
 
     /**
-     * Index of the previous version in this chain inside the {@link VersionStore},
-     * or {@code -1} if this is the first version of the row.
+     * Index of the previous (next-older) version in this chain inside the
+     * {@link VersionStore}, or {@code -1} if this is the first version of the
+     * row.
+     *
+     * <p>Mutable and {@code volatile}: when the vacuum process reclaims the
+     * oldest versions of a chain, the surviving oldest version becomes the new
+     * tail and has its {@code prevVersionId} reset to {@code -1}. Readers walk
+     * the chain via this link, so the volatile ensures they never observe a
+     * stale predecessor id.
      */
-    public final long prevVersionId;
+    public volatile long prevVersionId;
 
     /** The raw tuple bytes for this version. */
     public final byte[] data;

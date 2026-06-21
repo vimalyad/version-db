@@ -92,6 +92,58 @@ public final class VersionStore {
         }
     }
 
+    /**
+     * Reclaim the version record at {@code versionId}, replacing it with a
+     * tombstone ({@code null}). The slot is kept so that every other version's
+     * {@code versionId} (its list index) stays stable; only the record is
+     * dropped, letting the JVM reclaim its memory. A no-op if the id is out of
+     * range or already tombstoned.
+     *
+     * <p>Called by the vacuum process for versions that are invisible to all
+     * active and future transactions. {@link #get} returns {@code null} for a
+     * tombstoned id, which chain walkers treat as the end of the chain.
+     */
+    public void remove(long versionId) {
+        rwLock.writeLock().lock();
+        try {
+            if (versionId >= 0 && versionId < versions.size()) {
+                versions.set((int) versionId, null);
+            }
+        } finally {
+            rwLock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Return an immutable snapshot of the current {@code RID → headVersionId}
+     * map. Used by the vacuum process to iterate every version chain without
+     * holding the store lock for the whole sweep. The copy is taken under the
+     * read lock, so it is a consistent view at one instant; chains may change
+     * afterwards, which the vacuum tolerates by re-reading each head.
+     */
+    public Map<RID, Long> chainHeadsSnapshot() {
+        rwLock.readLock().lock();
+        try {
+            return new HashMap<>(chainHead);
+        } finally {
+            rwLock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Drop the chain-head mapping for {@code rid}. Called by the vacuum process
+     * when a row is fully dead (its entire version chain has been reclaimed), so
+     * the RID is no longer tracked. A no-op if the RID has no head.
+     */
+    public void removeHead(RID rid) {
+        rwLock.writeLock().lock();
+        try {
+            chainHead.remove(rid);
+        } finally {
+            rwLock.writeLock().unlock();
+        }
+    }
+
     /** Total number of version records (across all chains). */
     public int size() {
         rwLock.readLock().lock();
