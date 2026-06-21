@@ -17,7 +17,7 @@ How to use it:
 | Phase | Branch | Owner | Status |
 |---|---|---|---|
 | 0 — Foundation | `phase-00-foundation` | shared | done |
-| 1 — Page & DiskManager | `phase-01-storage-page` | M1 | in progress |
+| 1 — Page & DiskManager | `phase-01-storage-page` | M1 | done |
 | 2 — Buffer Pool | `phase-02-bufferpool` | M1 | not started |
 | 3 — Heap File | `phase-03-heapfile` | M1 | not started |
 | 4 — Catalog | `phase-04-catalog` | M1 | not started |
@@ -74,5 +74,6 @@ Newest entries at the top. Format per entry:
 - [2026-06-21] 1.1 — `storage/Page`: fixed 32-byte header (pageId, lsn, freeSpaceStart, freeSpaceEnd, numSlots, nextPageId, checksum) over a single PAGE_SIZE backing array; `create`, header accessors, `setLsn`/`setNextPageId`, `serialize`/`deserialize` with byte-for-byte round-trip. Files: `storage/Page.java`, `test/.../storage/PageTest.java`.
 - [2026-06-21] 1.2 — Slotted tuple ops on `Page`: `insertTuple` (data grows backward, slot array forward), `getTuple` (null on tombstone), `deleteTuple` (offset-0 tombstone, bytes kept for MVCC), `getFreeSpace` (accounts for the next slot entry); out-of-range/overflow throw `StorageException`. Files: `storage/Page.java`, `test/.../storage/PageTest.java`.
 - [2026-06-21] 1.3 — `storage/Crc32Util` and checksum wiring: `Page.serialize` recomputes a CRC32 over the page body (bytes after the header) into the checksum field; `Page.deserialize` recomputes and throws `StorageException` on mismatch to detect corruption. Files: `storage/Crc32Util.java`, `storage/Page.java`, `test/.../storage/PageTest.java`.
+- [2026-06-21] 1.4 — `storage/DiskManager`: owns the database file (one-page file header storing the total page count, page N at offset `PAGE_SIZE+(N*PAGE_SIZE)`); `readPage`, `writePage` (with fsync), `allocatePage` (writes an empty initialised page), `getNumPages`, `close`. Page count and data persist across reopen; out-of-range access and on-disk corruption throw `StorageException`. Files: `storage/DiskManager.java`, `test/.../storage/DiskManagerTest.java`. **Phase 1 complete** (42 tests green).
 
 <!-- Add real phase work below this line as it is implemented. -->
