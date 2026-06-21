@@ -11,6 +11,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -193,6 +195,143 @@ class BPlusTreeTest {
         assertEquals(new RID(60, 0), tree.search(Value.ofInt(60)));
         assertNull(tree.search(Value.ofInt(30)));
         assertNull(tree.search(Value.ofInt(70)));
+    }
+
+    // ---- 13.3: insert + splits -----------------------------------------------
+
+    /** Descend leftmost children to the first leaf. */
+    private BTreeNode leftmostLeaf(BPlusTree tree) {
+        BTreeNode n = tree.readNode(tree.getRootPageId());
+        while (!n.leaf) {
+            n = tree.readNode(n.children.get(0));
+        }
+        return n;
+    }
+
+    /** Collect all keys by walking the leaf chain; asserts strictly ascending order. */
+    private List<Integer> scanChainInts(BPlusTree tree) {
+        List<Integer> out = new ArrayList<>();
+        BTreeNode leaf = leftmostLeaf(tree);
+        Integer prev = null;
+        while (true) {
+            for (Value k : leaf.keys) {
+                int v = (int) k.asInt();
+                if (prev != null) {
+                    assertTrue(prev <= v, "leaf chain not sorted: " + prev + " then " + v);
+                }
+                prev = v;
+                out.add(v);
+            }
+            if (leaf.nextLeaf == Constants.INVALID_PAGE_ID) {
+                break;
+            }
+            leaf = tree.readNode(leaf.nextLeaf);
+        }
+        return out;
+    }
+
+    /** Assert every leaf is at the same depth (the tree is balanced). */
+    private void assertBalanced(BPlusTree tree) {
+        BTreeNode root = tree.readNode(tree.getRootPageId());
+        int depth = leafDepth(tree, root, 0, -1);
+        assertTrue(depth >= 0);
+    }
+
+    private int leafDepth(BPlusTree tree, BTreeNode node, int depth, int expected) {
+        if (node.leaf) {
+            return depth;
+        }
+        int common = -1;
+        for (int childId : node.children) {
+            int d = leafDepth(tree, tree.readNode(childId), depth + 1, expected);
+            if (common == -1) {
+                common = d;
+            } else {
+                assertEquals(common, d, "unbalanced tree: differing leaf depths");
+            }
+        }
+        return common;
+    }
+
+    @Test
+    void insertSequentialWithSplits() {
+        BufferPool bp = newPool(32);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT, 2); // tiny order forces splits
+        int n = 50;
+        for (int i = 1; i <= n; i++) {
+            tree.insert(Value.ofInt(i), new RID(i, 0));
+        }
+        for (int i = 1; i <= n; i++) {
+            assertEquals(new RID(i, 0), tree.search(Value.ofInt(i)), "missing key " + i);
+        }
+        List<Integer> chain = scanChainInts(tree);
+        assertEquals(n, chain.size());
+        assertEquals(1, chain.get(0));
+        assertEquals(n, chain.get(n - 1));
+        assertFalse(tree.readNode(tree.getRootPageId()).leaf, "root should have grown into an inner node");
+        assertBalanced(tree);
+    }
+
+    @Test
+    void insertReverseOrder() {
+        BufferPool bp = newPool(32);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT, 2);
+        for (int i = 40; i >= 1; i--) {
+            tree.insert(Value.ofInt(i), new RID(i, 0));
+        }
+        for (int i = 1; i <= 40; i++) {
+            assertEquals(new RID(i, 0), tree.search(Value.ofInt(i)));
+        }
+        assertEquals(40, scanChainInts(tree).size());
+        assertBalanced(tree);
+    }
+
+    @Test
+    void insertRandomOrderStaysSortedAndComplete() {
+        BufferPool bp = newPool(64);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT, 3);
+        List<Integer> keys = new ArrayList<>();
+        for (int i = 0; i < 300; i++) {
+            keys.add(i);
+        }
+        java.util.Collections.shuffle(keys, new java.util.Random(42));
+        for (int k : keys) {
+            tree.insert(Value.ofInt(k), new RID(k, 7));
+        }
+        List<Integer> chain = scanChainInts(tree);
+        assertEquals(300, chain.size());
+        for (int i = 0; i < 300; i++) {
+            assertEquals(i, chain.get(i));
+            assertEquals(new RID(i, 7), tree.search(Value.ofInt(i)));
+        }
+        assertBalanced(tree);
+    }
+
+    @Test
+    void duplicateKeysAllStored() {
+        BufferPool bp = newPool(32);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT, 2);
+        for (int i = 0; i < 10; i++) {
+            tree.insert(Value.ofInt(5), new RID(i, 0));
+        }
+        // All ten entries live in the chain even though the key repeats.
+        assertEquals(10, scanChainInts(tree).size());
+        assertNotNull(tree.search(Value.ofInt(5)));
+        assertBalanced(tree);
+    }
+
+    @Test
+    void insertSurvivesPageEviction() {
+        // Pool smaller than the tree forces nodes through disk and back.
+        BufferPool bp = newPool(4);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT, 2);
+        for (int i = 0; i < 100; i++) {
+            tree.insert(Value.ofInt(i), new RID(i, 1));
+        }
+        for (int i = 0; i < 100; i++) {
+            assertEquals(new RID(i, 1), tree.search(Value.ofInt(i)));
+        }
+        assertEquals(100, scanChainInts(tree).size());
     }
 
     @Test
