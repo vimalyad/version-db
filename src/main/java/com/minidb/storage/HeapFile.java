@@ -4,10 +4,14 @@ import com.minidb.shared.Constants;
 import com.minidb.shared.RID;
 import com.minidb.shared.StorageException;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 
 /**
  * An unordered collection of tuples for one table, stored as a singly-linked
@@ -171,6 +175,65 @@ public final class HeapFile {
             }
         }
         return Constants.INVALID_PAGE_ID;
+    }
+
+    // ---- Scan -----------------------------------------------------------------
+
+    /** One live tuple produced by a {@link #scan()}: its RID and its bytes. */
+    public record Entry(RID rid, byte[] data) {
+    }
+
+    /**
+     * Iterate over every live tuple in the heap. The scan walks the page chain
+     * by following each page's {@code nextPageId} and yields one {@link Entry}
+     * per non-tombstoned slot. Pages are loaded one at a time and unpinned after
+     * being read, so the scan holds at most one page pinned and buffers only the
+     * current page's tuples.
+     */
+    public Iterator<Entry> scan() {
+        return new ScanIterator();
+    }
+
+    private final class ScanIterator implements Iterator<Entry> {
+
+        private int currentPageId = firstPageId;
+        private final Deque<Entry> buffer = new ArrayDeque<>();
+
+        @Override
+        public boolean hasNext() {
+            fillBuffer();
+            return !buffer.isEmpty();
+        }
+
+        @Override
+        public Entry next() {
+            fillBuffer();
+            if (buffer.isEmpty()) {
+                throw new NoSuchElementException();
+            }
+            return buffer.poll();
+        }
+
+        /** Advance through pages until the buffer holds tuples or the chain ends. */
+        private void fillBuffer() {
+            while (buffer.isEmpty() && currentPageId != Constants.INVALID_PAGE_ID) {
+                Page page = bufferPool.fetchPage(currentPageId);
+                int next;
+                try {
+                    int numSlots = page.getNumSlots();
+                    for (int slot = 0; slot < numSlots; slot++) {
+                        byte[] data = page.getTuple(slot);
+                        if (data != null) {
+                            buffer.add(new Entry(new RID(currentPageId, slot), data));
+                        }
+                    }
+                    next = page.getNextPageId();
+                } finally {
+                    bufferPool.unpin(currentPageId, false);
+                }
+                currentPageId = next;
+            }
+        }
     }
 
     /** Allocate a new page, link it onto the tail of the chain, and register it. */
