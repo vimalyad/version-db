@@ -28,14 +28,17 @@ import java.util.concurrent.locks.ReentrantLock;
  * is applied during {@link #abortTransaction} to reverse version-store changes;
  * WAL-based undo during recovery is handled separately by the Recovery Manager.
  *
- * <p><b>Snapshot stub.</b> Snapshot creation in {@link #beginTransaction()} is
- * inlined for Phase 8. The SnapshotManager (Phase 9) will wrap and replace this
- * logic with isolation-level switching without changing the public API.
+ * <p><b>Snapshots.</b> Snapshot capture is delegated to {@link SnapshotManager},
+ * which calls back into {@link #captureSnapshot()} so the read of {@code nextXid}
+ * and the active set happens under {@code txnLock} as one atomic instant.
  */
 public final class TransactionManager {
 
     private final WALManager walManager;
     private final CommitLog commitLog;
+
+    /** Captures snapshots atomically against this manager's state. */
+    private final SnapshotManager snapshotManager = new SnapshotManager(this);
 
     /**
      * Guards {@code nextXid}, {@code activeTransactions}, and snapshot creation.
@@ -79,6 +82,11 @@ public final class TransactionManager {
         this.undoCallback = callback;
     }
 
+    /** The snapshot manager backing this transaction manager. */
+    public SnapshotManager getSnapshotManager() {
+        return snapshotManager;
+    }
+
     // -------------------------------------------------------------------------
     // 8.3 — beginTransaction
     // -------------------------------------------------------------------------
@@ -99,7 +107,10 @@ public final class TransactionManager {
         txnLock.lock();
         try {
             xid = nextXid.getAndIncrement();
-            snapshot = captureSnapshot();
+            // Capture before registering this XID so a transaction's own
+            // snapshot excludes itself (its own writes are made visible by XID
+            // match, not via the snapshot) — standard Snapshot-Isolation semantics.
+            snapshot = snapshotManager.createSnapshot();
             // Register as active before releasing the lock so concurrent
             // snapshots include this XID in their inProgressXids.
             activeTransactions.put(xid, null); // placeholder; replaced after WAL
@@ -237,15 +248,25 @@ public final class TransactionManager {
     // -------------------------------------------------------------------------
 
     /**
-     * Capture an immutable snapshot of the current active set. Must be called
-     * while holding {@code txnLock}. The snapshot's {@code xmax} is the current
+     * Capture an immutable snapshot of the current active set, holding
+     * {@code txnLock} so {@code nextXid} and the active set are read at one
+     * consistent instant. The lock is reentrant, so this is safe to call both
+     * from inside {@link #beginTransaction()} (already locked) and standalone
+     * for a per-statement snapshot. The snapshot's {@code xmax} is the current
      * {@code nextXid} value (the next XID to be assigned), so any transaction
      * whose XID is >= xmax did not exist when this snapshot was taken.
+     *
+     * <p>Package-private: invoked by {@link SnapshotManager#createSnapshot()}.
      */
-    private Snapshot captureSnapshot() {
-        Set<Long> inProgress = new HashSet<>(activeTransactions.keySet());
-        long xmax = nextXid.get();
-        long xmin = inProgress.stream().mapToLong(Long::longValue).min().orElse(xmax);
-        return new Snapshot(xmin, xmax, inProgress);
+    Snapshot captureSnapshot() {
+        txnLock.lock();
+        try {
+            Set<Long> inProgress = new HashSet<>(activeTransactions.keySet());
+            long xmax = nextXid.get();
+            long xmin = inProgress.stream().mapToLong(Long::longValue).min().orElse(xmax);
+            return new Snapshot(xmin, xmax, inProgress);
+        } finally {
+            txnLock.unlock();
+        }
     }
 }
