@@ -1,8 +1,10 @@
 package com.minidb.wal;
 
 import com.minidb.storage.BufferPool;
+import com.minidb.storage.Page;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -94,5 +96,70 @@ public final class RecoveryManager {
             }
         }
         return new Analysis(att, dpt, committed);
+    }
+
+    /**
+     * Redo pass — "repeat history". Re-applies every logged change (from any
+     * transaction, committed or not) starting at the smallest {@code recLsn} in
+     * the DPT, so the on-disk state matches the moment of the crash. A record is
+     * skipped when its page was clean at crash time (not in the DPT), the change
+     * predates the page's {@code recLsn}, or the page already reflects it
+     * ({@code page.lsn >= record.lsn}).
+     */
+    void redo(List<LogRecord> log, Map<Integer, Long> dpt) {
+        if (dpt.isEmpty()) {
+            return;
+        }
+        long redoStart = Collections.min(dpt.values());
+        for (LogRecord r : log) {
+            if (r.lsn < redoStart || !touchesPage(r)) {
+                continue;
+            }
+            Long recLsn = dpt.get(r.pageId);
+            if (recLsn == null || r.lsn < recLsn) {
+                continue; // page clean at crash, or this change is already on disk
+            }
+            Page page = bufferPool.fetchPage(r.pageId);
+            boolean applied = false;
+            try {
+                if (page.getLsn() < r.lsn) {
+                    applyRedo(page, r);
+                    page.setLsn(r.lsn);
+                    applied = true;
+                }
+            } finally {
+                bufferPool.unpin(r.pageId, applied);
+            }
+        }
+    }
+
+    private static boolean touchesPage(LogRecord r) {
+        return r.logType == LogType.INSERT
+                || r.logType == LogType.DELETE
+                || r.logType == LogType.CLR;
+    }
+
+    /**
+     * Apply a single record's effect to a page. INSERT recreates the tuple at
+     * its logged slot; DELETE tombstones it. A CLR carries the compensating
+     * action: non-empty data means a reinsert (undo of a delete), empty data
+     * means a delete (undo of an insert). MiniDB tuples are always non-empty
+     * (the codec emits at least the null bitmap), so empty data is unambiguous.
+     */
+    private static void applyRedo(Page page, LogRecord r) {
+        switch (r.logType) {
+            case INSERT -> page.putTupleAtSlot(r.slotId, r.data);
+            case DELETE -> page.deleteTuple(r.slotId);
+            case CLR -> {
+                if (r.data != null && r.data.length > 0) {
+                    page.putTupleAtSlot(r.slotId, r.data);
+                } else {
+                    page.deleteTuple(r.slotId);
+                }
+            }
+            default -> {
+                // non-page records are never passed here
+            }
+        }
     }
 }
