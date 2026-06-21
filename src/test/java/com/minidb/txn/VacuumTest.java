@@ -49,6 +49,18 @@ class VacuumTest {
         return new VersionRecord(xmin, xmax, new RID(1, 0), -1L, new byte[]{1});
     }
 
+    /** A vacuum whose horizon is fixed by a fresh manager with no active txns. */
+    private Vacuum vacuumWithHorizon(long horizon) {
+        return new Vacuum(vs, clog, new TransactionManager(horizon, wal, clog));
+    }
+
+    /** Allocate one version, register the chain head, and return its id. */
+    private long addVersion(RID rid, long xmin, long xmax, long prev, byte[] data) {
+        long id = vs.allocate(new VersionRecord(xmin, xmax, rid, prev, data));
+        vs.setHead(rid, id);
+        return id;
+    }
+
     // ---- 11.1: reclaim predicate ---------------------------------------------
 
     @Test
@@ -80,6 +92,91 @@ class VacuumTest {
         // even if xmax lingered, an ABORTED deleter must not be reclaimed.
         clog.setStatus(8L, TxStatus.ABORTED);
         assertFalse(vacuum.isReclaimable(version(5L, 8L), 100L));
+    }
+
+    // ---- 11.2: GC pass over version chains -----------------------------------
+
+    @Test
+    void gcRemovesReclaimableTailVersions() {
+        RID rid = new RID(2, 0);
+        // tail v1 (deleted by 2) → v2 (deleted by 3) → head v3 (live)
+        long v1 = addVersion(rid, 1L, 2L, -1L, new byte[]{1});
+        long v2 = addVersion(rid, 2L, 3L, v1, new byte[]{2});
+        long v3 = addVersion(rid, 3L, 0L, v2, new byte[]{3});
+        clog.setStatus(2L, TxStatus.COMMITTED);
+        clog.setStatus(3L, TxStatus.COMMITTED);
+
+        Vacuum vac = vacuumWithHorizon(10L); // both deleters < 10 and committed
+        assertEquals(2, vac.runOnce());
+
+        assertNull(vs.get(v1));
+        assertNull(vs.get(v2));
+        assertNotNull(vs.get(v3));
+        assertEquals(-1L, vs.get(v3).prevVersionId); // v3 is the new tail
+    }
+
+    @Test
+    void gcStopsAtFirstNonReclaimableFromTail() {
+        RID rid = new RID(3, 0);
+        long v1 = addVersion(rid, 1L, 2L, -1L, new byte[]{1}); // reclaimable
+        long v2 = addVersion(rid, 2L, 8L, v1, new byte[]{2});  // deleter >= horizon
+        long v3 = addVersion(rid, 3L, 0L, v2, new byte[]{3});  // live head
+        clog.setStatus(2L, TxStatus.COMMITTED);
+        clog.setStatus(8L, TxStatus.COMMITTED);
+
+        Vacuum vac = vacuumWithHorizon(5L);
+        assertEquals(1, vac.runOnce());
+
+        assertNull(vs.get(v1));
+        assertNotNull(vs.get(v2));
+        assertEquals(-1L, vs.get(v2).prevVersionId); // v2 detached as new tail
+        assertNotNull(vs.get(v3));
+        assertEquals(v2, vs.get(v3).prevVersionId);  // head still points at v2
+    }
+
+    @Test
+    void gcRemovesWholeChainWhenAllReclaimable() {
+        RID rid = new RID(4, 0);
+        long v1 = addVersion(rid, 1L, 2L, -1L, new byte[]{1});
+        long v2 = addVersion(rid, 2L, 3L, v1, new byte[]{2}); // head, but deleted
+        clog.setStatus(2L, TxStatus.COMMITTED);
+        clog.setStatus(3L, TxStatus.COMMITTED);
+
+        Vacuum vac = vacuumWithHorizon(10L);
+        assertEquals(2, vac.runOnce());
+        assertNull(vs.get(v1));
+        assertNull(vs.get(v2));
+    }
+
+    @Test
+    void gcIsNoOpWhenNothingReclaimable() {
+        RID rid = new RID(5, 0);
+        long v1 = addVersion(rid, 1L, 0L, -1L, new byte[]{1}); // live head
+        Vacuum vac = vacuumWithHorizon(10L);
+        assertEquals(0, vac.runOnce());
+        assertNotNull(vs.get(v1));
+    }
+
+    @Test
+    void readsRemainCorrectAfterGc() {
+        // Scenario 6 (part3.md §14): once a row's old versions are reclaimed,
+        // reads still return the correct current version.
+        MVCCManager mvcc = new MVCCManager(vs, clog, wal, bp);
+        RID rid = new RID(6, 0);
+        byte[] live = new byte[]{9, 9};
+        long old = addVersion(rid, 1L, 2L, -1L, new byte[]{1}); // deleted by 2
+        long cur = addVersion(rid, 2L, 0L, old, live);          // live head
+        clog.setStatus(2L, TxStatus.COMMITTED);
+
+        Snapshot snap = new Snapshot(10L, 11L, java.util.Set.of());
+        assertArrayEquals(live, mvcc.getVisibleVersion(rid, 10L, snap));
+
+        Vacuum vac = vacuumWithHorizon(10L);
+        assertEquals(1, vac.runOnce());
+        assertNull(vs.get(old));
+
+        // The live version is still readable after the old one was reclaimed.
+        assertArrayEquals(live, mvcc.getVisibleVersion(rid, 10L, snap));
     }
 
     @Test
