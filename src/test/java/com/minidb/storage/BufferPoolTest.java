@@ -9,6 +9,11 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -264,6 +269,46 @@ class BufferPoolTest {
         assertFalse(findFrame(pool, p0).isDirty);
         assertFalse(findFrame(pool, p2).isDirty);
         assertEquals(2, walCalls.size()); // p1 is clean — no WAL call
+    }
+
+    // ---- 2.5: Thread safety smoke test ---------------------------------------
+
+    @Test
+    void concurrentFetchUnpinDoesNotCorrupt() throws InterruptedException {
+        int numPages = 8;
+        int poolSize = 4;
+        for (int i = 0; i < numPages; i++) diskManager.allocatePage();
+        BufferPool pool = new BufferPool(poolSize, diskManager, noOpWal);
+
+        int threads = 4;
+        int opsPerThread = 60;
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        CountDownLatch ready = new CountDownLatch(threads);
+        AtomicInteger unexpectedErrors = new AtomicInteger();
+
+        for (int t = 0; t < threads; t++) {
+            final int tid = t;
+            executor.submit(() -> {
+                ready.countDown();
+                try { ready.await(); } catch (InterruptedException e) { return; }
+                for (int i = 0; i < opsPerThread; i++) {
+                    int pid = (tid * opsPerThread + i) % numPages;
+                    try {
+                        Page page = pool.fetchPage(pid);
+                        assertNotNull(page);
+                        pool.unpin(pid, false);
+                    } catch (StorageException ignored) {
+                        // pool exhausted under contention is acceptable
+                    } catch (Exception e) {
+                        unexpectedErrors.incrementAndGet();
+                    }
+                }
+            });
+        }
+
+        executor.shutdown();
+        assertTrue(executor.awaitTermination(15, TimeUnit.SECONDS));
+        assertEquals(0, unexpectedErrors.get());
     }
 
     // ---- helpers -------------------------------------------------------------
