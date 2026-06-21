@@ -177,6 +177,28 @@ public final class Catalog {
         return columns == null ? List.of() : List.copyOf(columns);
     }
 
+    // ---- Indexes --------------------------------------------------------------
+
+    /**
+     * Register a new index on a table column, persisting a record to the indexes
+     * heap and caching it. The B+Tree root page is owned by the query layer; the
+     * catalog only records its page id.
+     *
+     * @return the metadata for the registered index
+     */
+    public synchronized IndexMeta registerIndex(int tableId, String columnName, int rootPageId) {
+        IndexMeta index = new IndexMeta(nextIndexId++, tableId, columnName, rootPageId);
+        indexesHeap.insertTuple(encodeIndexMeta(index));
+        indexesByTableId.computeIfAbsent(tableId, k -> new ArrayList<>()).add(index);
+        return index;
+    }
+
+    /** @return the indexes on the table; an empty list if there are none. */
+    public List<IndexMeta> getIndexes(int tableId) {
+        List<IndexMeta> indexes = indexesByTableId.get(tableId);
+        return indexes == null ? List.of() : List.copyOf(indexes);
+    }
+
     // ---- Record encoding / decoding -------------------------------------------
 
     private static byte[] encodeTableMeta(TableMeta t) {
@@ -191,6 +213,12 @@ public final class Catalog {
                 Value.ofInt(c.tableId()), Value.ofString(c.columnName()),
                 Value.ofString(c.columnType().name()), Value.ofInt(c.columnIndex()),
                 Value.ofBool(c.isNullable())), COLUMNS_SCHEMA);
+    }
+
+    private static byte[] encodeIndexMeta(IndexMeta i) {
+        return TupleCodec.encode(List.of(
+                Value.ofInt(i.indexId()), Value.ofInt(i.tableId()),
+                Value.ofString(i.columnName()), Value.ofInt(i.rootPageId())), INDEXES_SCHEMA);
     }
 
     private static TableMeta decodeTableMeta(byte[] data) {
