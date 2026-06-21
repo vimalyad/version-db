@@ -6,7 +6,7 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.file.Path;
 import java.util.Arrays;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * A persistent record of the final status of every transaction, used by the
@@ -18,6 +18,14 @@ import java.util.concurrent.locks.ReentrantLock;
  * {@code (xid % 4) * 2}. The whole array is mirrored in an in-memory buffer so
  * reads ({@code getStatus}) are O(1) and never touch the disk; any id beyond the
  * end of the array is {@link TxStatus#IN_PROGRESS} by default.
+ *
+ * <p><b>Thread safety.</b> Because four transactions share one byte, two
+ * commits/aborts can target the same byte concurrently; a read-modify-write of
+ * that byte must therefore be serialized. A pool of striped read/write locks
+ * guards each byte (writers take the write lock, readers the read lock), so
+ * updates to <em>different</em> bytes proceed in parallel while same-byte updates
+ * do not race. A separate resize lock makes growing the buffer safe against
+ * concurrent access, and disk writes are serialized on the shared file handle.
  */
 public final class CommitLog implements AutoCloseable {
 
@@ -28,17 +36,28 @@ public final class CommitLog implements AutoCloseable {
     private static final int BITS_PER_STATUS = 2;
     private static final int STATUS_MASK = 0b11;
 
+    /** Number of striped byte locks; a power of two so masking selects a stripe. */
+    private static final int STRIPE_COUNT = 1024;
+
     private final RandomAccessFile file;
-    private final ReentrantLock lock = new ReentrantLock();
+
+    /** Guards buffer growth (write lock) vs. normal access (read lock). */
+    private final ReentrantReadWriteLock resizeLock = new ReentrantReadWriteLock();
+
+    /** Per-byte striped locks: distinct bytes update concurrently, same byte serializes. */
+    private final ReentrantReadWriteLock[] stripes = new ReentrantReadWriteLock[STRIPE_COUNT];
 
     /** In-memory mirror of the file; index = byte offset into the status array. */
-    private byte[] buffer;
+    private volatile byte[] buffer;
 
     /**
      * Open (or create) the commit log at the given path, loading any existing
      * status bytes into the in-memory buffer.
      */
     public CommitLog(Path path) {
+        for (int i = 0; i < STRIPE_COUNT; i++) {
+            stripes[i] = new ReentrantReadWriteLock();
+        }
         try {
             this.file = new RandomAccessFile(path.toFile(), "rw");
             long length = file.length();
@@ -58,17 +77,24 @@ public final class CommitLog implements AutoCloseable {
      */
     public TxStatus getStatus(long xid) {
         checkXid(xid);
-        lock.lock();
+        int byteIndex = (int) (xid / STATUSES_PER_BYTE);
+        int shift = (int) (xid % STATUSES_PER_BYTE) * BITS_PER_STATUS;
+        resizeLock.readLock().lock();
         try {
-            int byteIndex = (int) (xid / STATUSES_PER_BYTE);
-            if (byteIndex >= buffer.length) {
+            byte[] b = buffer;
+            if (byteIndex >= b.length) {
                 return TxStatus.IN_PROGRESS;
             }
-            int shift = (int) (xid % STATUSES_PER_BYTE) * BITS_PER_STATUS;
-            int code = (buffer[byteIndex] >> shift) & STATUS_MASK;
-            return TxStatus.fromCode(code);
+            ReentrantReadWriteLock stripe = stripeFor(byteIndex);
+            stripe.readLock().lock();
+            try {
+                int code = (b[byteIndex] >> shift) & STATUS_MASK;
+                return TxStatus.fromCode(code);
+            } finally {
+                stripe.readLock().unlock();
+            }
         } finally {
-            lock.unlock();
+            resizeLock.readLock().unlock();
         }
     }
 
@@ -80,22 +106,24 @@ public final class CommitLog implements AutoCloseable {
      */
     public void setStatus(long xid, TxStatus status) {
         checkXid(xid);
-        lock.lock();
+        int byteIndex = (int) (xid / STATUSES_PER_BYTE);
+        int shift = (int) (xid % STATUSES_PER_BYTE) * BITS_PER_STATUS;
+        ensureCapacity(byteIndex);
+        resizeLock.readLock().lock();
         try {
-            int byteIndex = (int) (xid / STATUSES_PER_BYTE);
-            ensureCapacity(byteIndex);
-            int shift = (int) (xid % STATUSES_PER_BYTE) * BITS_PER_STATUS;
-            int cleared = buffer[byteIndex] & ~(STATUS_MASK << shift);
-            buffer[byteIndex] = (byte) (cleared | (status.code() << shift));
+            byte[] b = buffer;
+            ReentrantReadWriteLock stripe = stripeFor(byteIndex);
+            stripe.writeLock().lock();
             try {
-                file.seek(byteIndex);
-                file.write(buffer[byteIndex]);
-                file.getFD().sync();
-            } catch (IOException e) {
-                throw new StorageException("failed to persist commit-log status for xid " + xid, e);
+                int cleared = b[byteIndex] & ~(STATUS_MASK << shift);
+                byte updated = (byte) (cleared | (status.code() << shift));
+                b[byteIndex] = updated;
+                persistByte(byteIndex, updated);
+            } finally {
+                stripe.writeLock().unlock();
             }
         } finally {
-            lock.unlock();
+            resizeLock.readLock().unlock();
         }
     }
 
@@ -106,20 +134,51 @@ public final class CommitLog implements AutoCloseable {
 
     @Override
     public void close() {
-        lock.lock();
+        resizeLock.writeLock().lock();
         try {
             file.close();
         } catch (IOException e) {
             throw new StorageException("failed to close commit log", e);
         } finally {
-            lock.unlock();
+            resizeLock.writeLock().unlock();
         }
     }
 
-    private void ensureCapacity(int byteIndex) {
-        if (byteIndex >= buffer.length) {
-            buffer = Arrays.copyOf(buffer, byteIndex + 1);
+    /** Write one status byte through to disk and fsync. Serialized on the file handle. */
+    private void persistByte(int byteIndex, byte value) {
+        synchronized (file) {
+            try {
+                file.seek(byteIndex);
+                file.write(value);
+                file.getFD().sync();
+            } catch (IOException e) {
+                throw new StorageException("failed to persist commit-log byte " + byteIndex, e);
+            }
         }
+    }
+
+    /** Grow the buffer so {@code byteIndex} is addressable, under the resize write lock. */
+    private void ensureCapacity(int byteIndex) {
+        resizeLock.readLock().lock();
+        try {
+            if (byteIndex < buffer.length) {
+                return;
+            }
+        } finally {
+            resizeLock.readLock().unlock();
+        }
+        resizeLock.writeLock().lock();
+        try {
+            if (byteIndex >= buffer.length) {
+                buffer = Arrays.copyOf(buffer, byteIndex + 1);
+            }
+        } finally {
+            resizeLock.writeLock().unlock();
+        }
+    }
+
+    private ReentrantReadWriteLock stripeFor(int byteIndex) {
+        return stripes[byteIndex & (STRIPE_COUNT - 1)];
     }
 
     private static void checkXid(long xid) {

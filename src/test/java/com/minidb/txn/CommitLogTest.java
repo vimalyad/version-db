@@ -8,6 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.minidb.shared.StorageException;
 
 import java.nio.file.Path;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -112,6 +114,67 @@ class CommitLogTest {
             assertTrue(log.isCommitted(5));
             log.setStatus(5, TxStatus.ABORTED);
             assertFalse(log.isCommitted(5));
+        }
+    }
+
+    @Test
+    void concurrentWritesToTheSameByteAllLand() throws InterruptedException {
+        try (CommitLog log = new CommitLog(clog())) {
+            // xids 0..3 share byte 0 — concurrent writers must not clobber each other.
+            int writers = 4;
+            CountDownLatch start = new CountDownLatch(1);
+            CountDownLatch done = new CountDownLatch(writers);
+            for (int i = 0; i < writers; i++) {
+                final long xid = i;
+                final TxStatus status = (i % 2 == 0) ? TxStatus.COMMITTED : TxStatus.ABORTED;
+                new Thread(() -> {
+                    try {
+                        start.await();
+                        for (int r = 0; r < 1000; r++) {
+                            log.setStatus(xid, status);
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        done.countDown();
+                    }
+                }).start();
+            }
+            start.countDown();
+            assertTrue(done.await(10, TimeUnit.SECONDS));
+
+            assertEquals(TxStatus.COMMITTED, log.getStatus(0));
+            assertEquals(TxStatus.ABORTED, log.getStatus(1));
+            assertEquals(TxStatus.COMMITTED, log.getStatus(2));
+            assertEquals(TxStatus.ABORTED, log.getStatus(3));
+        }
+    }
+
+    @Test
+    void concurrentWritesAcrossManyBytesAllLand() throws InterruptedException {
+        try (CommitLog log = new CommitLog(clog())) {
+            int n = 2000;
+            CountDownLatch start = new CountDownLatch(1);
+            CountDownLatch done = new CountDownLatch(n);
+            for (int i = 0; i < n; i++) {
+                final long xid = i;
+                new Thread(() -> {
+                    try {
+                        start.await();
+                        log.setStatus(xid, TxStatus.COMMITTED);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        done.countDown();
+                    }
+                }).start();
+            }
+            start.countDown();
+            assertTrue(done.await(15, TimeUnit.SECONDS));
+
+            for (int i = 0; i < n; i++) {
+                assertTrue(log.isCommitted(i), "xid " + i + " should be committed");
+            }
         }
     }
 
