@@ -20,7 +20,7 @@ How to use it:
 | 1 — Page & DiskManager | `phase-01-storage-page` | M1 | done |
 | 2 — Buffer Pool | `phase-02-bufferpool` | M1 | done |
 | 3 — Heap File | `phase-03-heapfile` | M1 | done |
-| 4 — Catalog | `phase-04-catalog` | M1 | in progress |
+| 4 — Catalog | `phase-04-catalog` | M1 | done |
 | 5 — WAL Manager | `phase-05-wal` | M1 | not started |
 | 6 — Recovery (ARIES) | `phase-06-recovery` | M1 | not started |
 | 7 — Commit Log | `phase-07-commitlog` | M3 | not started |
@@ -97,3 +97,4 @@ Newest entries at the top. Format per entry:
 - [2026-06-21] 4.1 — `storage/Catalog`: three system heaps at fixed pages (tables=0, columns=1, indexes=2). The constructor bootstraps them on a fresh database (verifying each lands on its expected page id) or opens the existing heaps and rebuilds the in-memory caches (`tablesByName`/`tablesById`, `columnsByTableId` sorted by column index, `indexesByTableId`) by scanning them; `nextTableId`/`nextIndexId` recovered from the loaded records. Metadata records are decoded via `TupleCodec` against fixed per-heap schemas. Files: `storage/Catalog.java`, `test/.../storage/CatalogTest.java`.
 - [2026-06-21] 4.2 — `createTable(name, columns)` allocates the table's heap file, assigns the next table id, and persists one tables-heap record plus one columns-heap record per column (in order); `getTable(name)` (null if absent) and `getColumns(tableId)` (an unmodifiable copy in column-index order). Duplicate table names throw `StorageException`. Verified to survive reopen (with a buffer-pool `flushAll` before close). Files: `storage/Catalog.java`, `test/.../storage/CatalogTest.java`.
 - [2026-06-21] 4.3 — `registerIndex(tableId, columnName, rootPageId)` assigns the next index id, persists an indexes-heap record, and caches it; `getIndexes(tableId)` returns an unmodifiable copy (empty if none). Index records and the `nextIndexId` counter survive reopen. Files: `storage/Catalog.java`, `test/.../storage/CatalogTest.java`.
+- [2026-06-21] 4.4 — In-memory optimizer statistics: `updateStats(tableId, stats)` caches a `TableStats`; `getStats(tableName)` returns it, or a default built from the table's cached row/page counts (empty column stats) when none have been gathered, or `null` for an unknown table. Not persisted (recomputed by the execution engine, per `part1.md` §6.4). Files: `storage/Catalog.java`, `test/.../storage/CatalogTest.java`. **Phase 4 complete** (96 tests green).

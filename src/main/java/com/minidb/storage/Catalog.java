@@ -6,6 +6,7 @@ import com.minidb.shared.ColumnType;
 import com.minidb.shared.IndexMeta;
 import com.minidb.shared.StorageException;
 import com.minidb.shared.TableMeta;
+import com.minidb.shared.TableStats;
 import com.minidb.shared.Value;
 
 import java.util.ArrayList;
@@ -66,6 +67,14 @@ public final class Catalog {
     private final Map<Integer, TableMeta> tablesById = new HashMap<>();
     private final Map<Integer, List<ColumnMeta>> columnsByTableId = new HashMap<>();
     private final Map<Integer, List<IndexMeta>> indexesByTableId = new HashMap<>();
+
+    /**
+     * Optimizer statistics, held in memory only. The execution engine refreshes
+     * these periodically via {@link #updateStats}; they are not persisted (see
+     * {@code part1.md} §6.4), so they start empty after a reopen and are derived
+     * from {@link TableMeta} until recomputed.
+     */
+    private final Map<Integer, TableStats> statsByTableId = new HashMap<>();
 
     private int nextTableId = 0;
     private int nextIndexId = 0;
@@ -197,6 +206,32 @@ public final class Catalog {
     public List<IndexMeta> getIndexes(int tableId) {
         List<IndexMeta> indexes = indexesByTableId.get(tableId);
         return indexes == null ? List.of() : List.copyOf(indexes);
+    }
+
+    // ---- Statistics -----------------------------------------------------------
+
+    /**
+     * Optimizer statistics for a table. Returns the most recently supplied stats
+     * from {@link #updateStats}, or — if none have been gathered yet — a default
+     * derived from the table's cached row/page counts with no per-column stats.
+     *
+     * @return the table's statistics, or {@code null} if the table is unknown
+     */
+    public synchronized TableStats getStats(String tableName) {
+        TableMeta table = tablesByName.get(tableName);
+        if (table == null) {
+            return null;
+        }
+        TableStats stats = statsByTableId.get(table.tableId());
+        if (stats != null) {
+            return stats;
+        }
+        return new TableStats(table.numTuples(), table.numPages(), Map.of());
+    }
+
+    /** Replace the cached optimizer statistics for a table. */
+    public synchronized void updateStats(int tableId, TableStats stats) {
+        statsByTableId.put(tableId, stats);
     }
 
     // ---- Record encoding / decoding -------------------------------------------
