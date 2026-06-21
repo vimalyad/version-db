@@ -92,6 +92,22 @@ public final class VersionStore {
         }
     }
 
+    /**
+     * Return an immutable snapshot of the current {@code RID → headVersionId}
+     * map. Used by the vacuum process to iterate every version chain without
+     * holding the store lock for the whole sweep. The copy is taken under the
+     * read lock, so it is a consistent view at one instant; chains may change
+     * afterwards, which the vacuum tolerates by re-reading each head.
+     */
+    public Map<RID, Long> chainHeadsSnapshot() {
+        rwLock.readLock().lock();
+        try {
+            return new HashMap<>(chainHead);
+        } finally {
+            rwLock.readLock().unlock();
+        }
+    }
+
     /** Total number of version records (across all chains). */
     public int size() {
         rwLock.readLock().lock();
