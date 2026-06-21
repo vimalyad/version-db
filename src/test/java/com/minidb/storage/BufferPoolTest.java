@@ -7,6 +7,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -187,6 +189,81 @@ class BufferPoolTest {
 
         Page reread = diskManager.readPage(p0);
         assertArrayEquals(payload, reread.getTuple(0));
+    }
+
+    // ---- 2.4: flushPage / flushAll + WAL rule hook ---------------------------
+
+    @Test
+    void walCallbackInvokedBeforeDirtyEviction() {
+        int p0 = diskManager.allocatePage();
+        int p1 = diskManager.allocatePage();
+        List<Long> flushedLsns = new ArrayList<>();
+        BufferPool pool = new BufferPool(1, diskManager, flushedLsns::add);
+        Page page = pool.fetchPage(p0);
+        page.setLsn(42L);
+        pool.unpin(p0, true);
+
+        pool.fetchPage(p1); // evicts dirty p0 — WAL callback must fire with lsn=42
+
+        assertEquals(1, flushedLsns.size());
+        assertEquals(42L, flushedLsns.get(0));
+    }
+
+    @Test
+    void flushPageWritesDirtyPageAndMarksClean() {
+        int pid = diskManager.allocatePage();
+        BufferPool pool = new BufferPool(4, diskManager, noOpWal);
+        Page page = pool.fetchPage(pid);
+        byte[] payload = new byte[]{7, 8, 9};
+        page.insertTuple(payload);
+        pool.markDirty(pid);
+
+        pool.flushPage(pid);
+
+        assertFalse(findFrame(pool, pid).isDirty);
+        Page reread = diskManager.readPage(pid);
+        assertArrayEquals(payload, reread.getTuple(0));
+    }
+
+    @Test
+    void flushPageIsNoOpForCleanPage() {
+        int pid = diskManager.allocatePage();
+        List<Long> walCalls = new ArrayList<>();
+        BufferPool pool = new BufferPool(4, diskManager, walCalls::add);
+        pool.fetchPage(pid); // not marked dirty
+        pool.flushPage(pid);
+        assertTrue(walCalls.isEmpty());
+    }
+
+    @Test
+    void flushPageInvokesWalCallback() {
+        int pid = diskManager.allocatePage();
+        List<Long> walLsns = new ArrayList<>();
+        BufferPool pool = new BufferPool(4, diskManager, walLsns::add);
+        Page page = pool.fetchPage(pid);
+        page.setLsn(99L);
+        pool.markDirty(pid);
+        pool.flushPage(pid);
+        assertEquals(List.of(99L), walLsns);
+    }
+
+    @Test
+    void flushAllFlushesEveryDirtyFrame() {
+        int p0 = diskManager.allocatePage();
+        int p1 = diskManager.allocatePage();
+        int p2 = diskManager.allocatePage();
+        List<Long> walCalls = new ArrayList<>();
+        BufferPool pool = new BufferPool(4, diskManager, lsn -> walCalls.add(lsn));
+
+        pool.fetchPage(p0); pool.markDirty(p0); pool.unpin(p0, false);
+        pool.fetchPage(p1);                     pool.unpin(p1, false); // clean
+        pool.fetchPage(p2); pool.markDirty(p2); pool.unpin(p2, false);
+
+        pool.flushAll();
+
+        assertFalse(findFrame(pool, p0).isDirty);
+        assertFalse(findFrame(pool, p2).isDirty);
+        assertEquals(2, walCalls.size()); // p1 is clean — no WAL call
     }
 
     // ---- helpers -------------------------------------------------------------
