@@ -188,24 +188,41 @@ public final class Page {
     // ---- Serialization --------------------------------------------------------
 
     /**
-     * Produce the on-disk image of this page. Returns the backing array directly
+     * Produce the on-disk image of this page. The checksum field is recomputed
+     * over the page body before returning. Returns the backing array directly
      * (no copy): the buffer pool serializes a page only to immediately hand it to
      * the disk manager for writing.
      */
     public byte[] serialize() {
+        buf.putInt(OFF_CHECKSUM, computeBodyChecksum());
         return data;
     }
 
     /**
-     * Parse a page from its on-disk image. The array must be exactly
-     * {@link Constants#PAGE_SIZE} bytes; it is adopted as the page's backing
-     * store without copying.
+     * Parse a page from its on-disk image and verify its checksum. The array must
+     * be exactly {@link Constants#PAGE_SIZE} bytes; it is adopted as the page's
+     * backing store without copying.
+     *
+     * @throws StorageException if the stored checksum does not match the body —
+     *         the page is corrupt (partial write, hardware fault, etc.)
      */
     public static Page deserialize(byte[] bytes) {
         if (bytes.length != Constants.PAGE_SIZE) {
             throw new IllegalArgumentException(
                     "page image must be " + Constants.PAGE_SIZE + " bytes, got " + bytes.length);
         }
-        return new Page(bytes);
+        Page page = new Page(bytes);
+        int stored = page.buf.getInt(OFF_CHECKSUM);
+        int actual = page.computeBodyChecksum();
+        if (stored != actual) {
+            throw new StorageException("checksum mismatch on page " + page.getPageId()
+                    + ": stored " + stored + ", computed " + actual + " (corrupt page)");
+        }
+        return page;
+    }
+
+    /** CRC32 over the page body — everything after the fixed header. */
+    private int computeBodyChecksum() {
+        return Crc32Util.compute(data, HEADER_SIZE, Constants.PAGE_SIZE - HEADER_SIZE);
     }
 }
