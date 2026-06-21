@@ -120,6 +120,66 @@ public final class BPlusTree {
         return BTreeNode.compare(keyType, a, b);
     }
 
+    // ---- 13.2: search ---------------------------------------------------------
+
+    /**
+     * Find the RID stored under {@code key}, or {@code null} if the key is not
+     * present. When several entries share the key, the first (leftmost) RID is
+     * returned. O(log n).
+     */
+    public RID search(Value key) {
+        BTreeNode leaf = findLeaf(key);
+        int i = lowerBound(leaf, key);
+        if (i < leaf.keyCount() && compare(leaf.keys.get(i), key) == 0) {
+            return leaf.rids.get(i);
+        }
+        return null;
+    }
+
+    /** Descend from the root to the leaf that would contain {@code key}. */
+    BTreeNode findLeaf(Value key) {
+        BTreeNode node = readNode(rootPageId);
+        while (!node.leaf) {
+            node = readNode(node.children.get(childIndex(node, key)));
+        }
+        return node;
+    }
+
+    /**
+     * Index of the child to descend into for {@code key}: the number of
+     * separator keys {@code <= key}. Keys left of the chosen child are strictly
+     * less than {@code key}; the chosen subtree holds keys {@code >= } the
+     * separator to its left.
+     */
+    int childIndex(BTreeNode inner, Value key) {
+        int lo = 0;
+        int hi = inner.keyCount();
+        while (lo < hi) {
+            int mid = (lo + hi) >>> 1;
+            if (compare(key, inner.keys.get(mid)) < 0) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        return lo;
+    }
+
+    /** First index in {@code leaf} whose key is {@code >= key} (insertion point). */
+    int lowerBound(BTreeNode leaf, Value key) {
+        int lo = 0;
+        int hi = leaf.keyCount();
+        while (lo < hi) {
+            int mid = (lo + hi) >>> 1;
+            if (compare(leaf.keys.get(mid), key) < 0) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return lo;
+    }
+
     // ---- Order sizing ---------------------------------------------------------
 
     /**
