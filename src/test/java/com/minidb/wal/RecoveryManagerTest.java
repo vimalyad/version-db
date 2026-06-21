@@ -1,14 +1,24 @@
 package com.minidb.wal;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.minidb.storage.BufferPool;
+import com.minidb.storage.DiskManager;
+import com.minidb.storage.Page;
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.Test;
 
 class RecoveryManagerTest {
+
+    @TempDir
+    Path tmp;
 
     // ---- 6.1: Analysis pass --------------------------------------------------
 
@@ -71,5 +81,51 @@ class RecoveryManagerTest {
         assertEquals(101L, a.att().get(9L), "checkpoint-seeded txn advanced by post-checkpoint record");
         assertFalse(a.committed().contains(1L), "pre-checkpoint commit is not re-scanned");
         assertEquals(100L, a.dpt().get(42), "DPT seeded from checkpoint keeps earliest recLsn");
+    }
+
+    // ---- 6.2: Redo pass ------------------------------------------------------
+
+    @Test
+    void redoReappliesCommittedInsertLostFromBufferPool() throws IOException {
+        DiskManager dm = new DiskManager(tmp.resolve("redo.db"));
+        WALManager wal = new WALManager(tmp.resolve("redo.wal"));
+        byte[] data = {10, 20, 30};
+        try {
+            // Pre-crash: a committed insert whose dirty page is never flushed.
+            BufferPool bp1 = new BufferPool(8, dm, wal::flushToLsn);
+            wal.logBegin(1);
+            Page p = bp1.newPage();
+            int pid = p.getPageId();
+            int slot = p.insertTuple(data);
+            long insLsn = wal.logInsert(1, pid, slot, data);
+            p.setLsn(insLsn);
+            bp1.unpin(pid, true);   // dirty, but bp1 is abandoned without flushing
+            wal.logCommit(1);        // WAL (begin+insert+commit) is now durable
+
+            // Crash + restart: a fresh buffer pool re-reads the empty page from disk.
+            BufferPool bp2 = new BufferPool(8, dm, wal::flushToLsn);
+            RecoveryManager rm = new RecoveryManager(wal, bp2);
+            List<LogRecord> log = rm.readAllRecords();
+            RecoveryManager.Analysis a = RecoveryManager.analyze(log);
+
+            rm.redo(log, a.dpt());
+            assertArrayEquals(data, fetch(bp2, pid, slot), "redo must re-apply the lost insert");
+
+            // Redo is idempotent: running it again changes nothing (page.lsn guards).
+            rm.redo(log, a.dpt());
+            assertArrayEquals(data, fetch(bp2, pid, slot));
+        } finally {
+            wal.close();
+            dm.close();
+        }
+    }
+
+    private static byte[] fetch(BufferPool bp, int pageId, int slotId) {
+        Page page = bp.fetchPage(pageId);
+        try {
+            return page.getTuple(slotId);
+        } finally {
+            bp.unpin(pageId, false);
+        }
     }
 }
