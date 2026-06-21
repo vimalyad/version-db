@@ -10,6 +10,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.Set;
 
 /**
@@ -38,8 +39,32 @@ public final class RecoveryManager {
         this.bufferPool = bufferPool;
     }
 
+    private static final byte[] EMPTY = new byte[0];
+
     /** Outcome of the Analysis pass. */
     record Analysis(Map<Long, Long> att, Map<Integer, Long> dpt, Set<Long> committed) {
+    }
+
+    /**
+     * Outcome of a full {@link #recover()}: the transactions that had committed,
+     * and the loser transactions that were rolled back. (Used by the commit log
+     * and integration layers to reconcile transaction status.)
+     */
+    public record RecoveryResult(Set<Long> committed, Set<Long> undone) {
+    }
+
+    /**
+     * Run full crash recovery: Analysis, then Redo (repeat history), then Undo
+     * (roll back losers, writing CLRs). Dirty pages are flushed at the end so the
+     * recovered state is durable. Idempotent: a second run is a no-op.
+     */
+    public RecoveryResult recover() {
+        List<LogRecord> log = readAllRecords();
+        Analysis analysis = analyze(log);
+        redo(log, analysis.dpt());
+        Set<Long> undone = undo(log, analysis.att());
+        bufferPool.flushAll();
+        return new RecoveryResult(analysis.committed(), undone);
     }
 
     /** Read the entire log into memory, fully draining the iterator. */
@@ -137,6 +162,85 @@ public final class RecoveryManager {
         return r.logType == LogType.INSERT
                 || r.logType == LogType.DELETE
                 || r.logType == LogType.CLR;
+    }
+
+    /**
+     * Undo pass. Rolls back every loser transaction in reverse chronological
+     * order using a max-heap of LSNs. Each undone INSERT/DELETE writes a CLR
+     * (so the work is not repeated if recovery itself crashes) and applies the
+     * compensating action to the page; a CLR is skipped (never re-undone) and
+     * its {@code undoNextLsn} resumes past the already-undone record; reaching a
+     * transaction's BEGIN emits its ABORT.
+     *
+     * @return the set of loser transactions that were rolled back
+     */
+    Set<Long> undo(List<LogRecord> log, Map<Long, Long> att) {
+        Map<Long, LogRecord> byLsn = new HashMap<>();
+        for (LogRecord r : log) {
+            byLsn.put(r.lsn, r);
+        }
+        Set<Long> losers = new HashSet<>(att.keySet());
+
+        // Max-heap so the most recent change across all losers is undone first.
+        PriorityQueue<Long> heap = new PriorityQueue<>(Collections.reverseOrder());
+        heap.addAll(att.values());
+
+        while (!heap.isEmpty()) {
+            LogRecord r = byLsn.get(heap.poll());
+            if (r == null) {
+                continue;
+            }
+            switch (r.logType) {
+                case INSERT -> {
+                    long clrLsn = wal.logClr(r.txnId, r.pageId, r.slotId, r.prevLsn, EMPTY);
+                    applyUndo(r.pageId, r.slotId, null, clrLsn); // undo insert = delete
+                    advance(heap, r);
+                }
+                case DELETE -> {
+                    long clrLsn = wal.logClr(r.txnId, r.pageId, r.slotId, r.prevLsn, r.data);
+                    applyUndo(r.pageId, r.slotId, r.data, clrLsn); // undo delete = reinsert
+                    advance(heap, r);
+                }
+                case CLR -> {
+                    if (r.undoNextLsn != LogRecord.NO_PREVIOUS_LSN) {
+                        heap.add(r.undoNextLsn);
+                    } else {
+                        wal.logAbort(r.txnId);
+                    }
+                }
+                case BEGIN -> wal.logAbort(r.txnId); // transaction fully undone
+                default -> advance(heap, r); // COMMIT/ABORT/CHECKPOINT: not expected for a loser
+            }
+        }
+        return losers;
+    }
+
+    /** Continue a loser's chain at its previous record, or abort it if there is none. */
+    private void advance(PriorityQueue<Long> heap, LogRecord r) {
+        if (r.prevLsn != LogRecord.NO_PREVIOUS_LSN) {
+            heap.add(r.prevLsn);
+        } else {
+            wal.logAbort(r.txnId);
+        }
+    }
+
+    /**
+     * Apply a compensating action to a page during undo: {@code data == null}
+     * deletes the tuple (undo of an insert); otherwise the tuple is restored at
+     * its slot (undo of a delete). The page's LSN is set to the CLR's LSN.
+     */
+    private void applyUndo(int pageId, int slotId, byte[] data, long clrLsn) {
+        Page page = bufferPool.fetchPage(pageId);
+        try {
+            if (data == null) {
+                page.deleteTuple(slotId);
+            } else {
+                page.putTupleAtSlot(slotId, data);
+            }
+            page.setLsn(clrLsn);
+        } finally {
+            bufferPool.unpin(pageId, true);
+        }
     }
 
     /**
