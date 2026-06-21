@@ -77,3 +77,6 @@ Newest entries at the top. Format per entry:
 - [2026-06-21] 1.4 — `storage/DiskManager`: owns the database file (one-page file header storing the total page count, page N at offset `PAGE_SIZE+(N*PAGE_SIZE)`); `readPage`, `writePage` (with fsync), `allocatePage` (writes an empty initialised page), `getNumPages`, `close`. Page count and data persist across reopen; out-of-range access and on-disk corruption throw `StorageException`. Files: `storage/DiskManager.java`, `test/.../storage/DiskManagerTest.java`. **Phase 1 complete** (42 tests green).
 
 <!-- Add real phase work below this line as it is implemented. -->
+
+### Phase 2 — Buffer Pool  (branch: phase-02-bufferpool)
+- [2026-06-21] 2.1 — `storage/Frame` (pageId, page, pinCount, isDirty, refBit) with all fields defaulting to empty-slot state; `storage/BufferPool` constructor: fixed-size `Frame[]` array and `HashMap<Integer,Integer>` page table; `storage/WalFlushCallback` functional interface for the WAL-rule hook (no-op stub until Phase 5). Files: `storage/Frame.java`, `storage/WalFlushCallback.java`, `storage/BufferPool.java`, `test/.../storage/BufferPoolTest.java`.
