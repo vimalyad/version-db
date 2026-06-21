@@ -142,7 +142,11 @@ class CommitLogTest {
                 }).start();
             }
             start.countDown();
-            assertTrue(done.await(10, TimeUnit.SECONDS));
+            // 4 x 1000 status writes each fsync through to disk; on a slow disk
+            // that is several thousand syncs, so allow generous headroom (the
+            // lighter many-bytes test uses 15s for 2000 writes). The point of the
+            // test is the final no-clobber result below, not throughput.
+            assertTrue(done.await(30, TimeUnit.SECONDS));
 
             assertEquals(TxStatus.COMMITTED, log.getStatus(0));
             assertEquals(TxStatus.ABORTED, log.getStatus(1));

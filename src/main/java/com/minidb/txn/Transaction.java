@@ -26,7 +26,14 @@ public final class Transaction {
     /** This transaction's unique, never-reused XID. */
     public final long xid;
 
-    /** Snapshot taken at begin time; updated by SnapshotManager in Phase 9. */
+    /** Isolation level fixed at begin time; decides snapshot lifetime. */
+    public final IsolationLevel isolationLevel;
+
+    /**
+     * The snapshot reads are evaluated against. Under REPEATABLE READ it is the
+     * begin-time snapshot and never changes; under READ COMMITTED the
+     * TransactionManager refreshes it at each statement boundary.
+     */
     private volatile Snapshot snapshot;
 
     /** Current lifecycle status. Volatile for cross-thread visibility on commit/abort. */
@@ -44,9 +51,15 @@ public final class Transaction {
      */
     private final Set<RID> writeSet = new HashSet<>();
 
+    /** Convenience constructor defaulting to the {@link IsolationLevel#DEFAULT} level. */
     Transaction(long xid, Snapshot snapshot) {
+        this(xid, snapshot, IsolationLevel.DEFAULT);
+    }
+
+    Transaction(long xid, Snapshot snapshot, IsolationLevel isolationLevel) {
         this.xid = xid;
         this.snapshot = snapshot;
+        this.isolationLevel = isolationLevel;
         this.status = TxStatus.IN_PROGRESS;
     }
 
@@ -56,7 +69,11 @@ public final class Transaction {
         return snapshot;
     }
 
-    /** Package-private: SnapshotManager replaces the stub in Phase 9. */
+    /**
+     * Package-private: replace the current snapshot. Used by the
+     * TransactionManager to refresh a READ COMMITTED transaction's snapshot at
+     * each statement boundary.
+     */
     void setSnapshot(Snapshot snapshot) {
         this.snapshot = snapshot;
     }
