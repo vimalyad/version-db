@@ -1,7 +1,9 @@
 package com.minidb.txn;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.minidb.shared.StorageException;
 
@@ -83,6 +85,33 @@ class CommitLogTest {
         try (CommitLog log = new CommitLog(clog())) {
             assertThrows(StorageException.class, () -> log.getStatus(-1));
             assertThrows(StorageException.class, () -> log.setStatus(-1, TxStatus.COMMITTED));
+        }
+    }
+
+    @Test
+    void statusSurvivesReopen() {
+        Path path = clog();
+        try (CommitLog log = new CommitLog(path)) {
+            log.setStatus(1, TxStatus.COMMITTED);
+            log.setStatus(2, TxStatus.ABORTED);
+            log.setStatus(9000, TxStatus.COMMITTED);
+        }
+        try (CommitLog log = new CommitLog(path)) {
+            assertEquals(TxStatus.COMMITTED, log.getStatus(1));
+            assertEquals(TxStatus.ABORTED, log.getStatus(2));
+            assertEquals(TxStatus.COMMITTED, log.getStatus(9000));
+            assertEquals(TxStatus.IN_PROGRESS, log.getStatus(3));
+        }
+    }
+
+    @Test
+    void isCommittedReflectsStatus() {
+        try (CommitLog log = new CommitLog(clog())) {
+            assertFalse(log.isCommitted(5));            // never set
+            log.setStatus(5, TxStatus.COMMITTED);
+            assertTrue(log.isCommitted(5));
+            log.setStatus(5, TxStatus.ABORTED);
+            assertFalse(log.isCommitted(5));
         }
     }
 
