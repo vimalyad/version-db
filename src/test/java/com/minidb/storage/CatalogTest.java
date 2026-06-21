@@ -10,9 +10,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.minidb.shared.ColumnDef;
 import com.minidb.shared.ColumnMeta;
 import com.minidb.shared.ColumnType;
+import com.minidb.shared.ColumnStats;
 import com.minidb.shared.IndexMeta;
 import com.minidb.shared.StorageException;
 import com.minidb.shared.TableMeta;
+import com.minidb.shared.TableStats;
+import com.minidb.shared.Value;
+
+import java.util.Map;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -139,6 +144,43 @@ class CatalogTest {
             assertEquals("id", columns.get(0).columnName());
             assertEquals("name", columns.get(1).columnName());
             assertEquals("active", columns.get(2).columnName());
+        }
+    }
+
+    @Test
+    void statsRoundTripThroughCache() {
+        try (DiskManager dm = new DiskManager(tmp.resolve("n.db"))) {
+            Catalog catalog = new Catalog(pool(dm), dm);
+            TableMeta t = catalog.createTable("users", usersSchema());
+
+            ColumnStats idStats = new ColumnStats(100, Value.ofInt(1), Value.ofInt(500), 0);
+            TableStats stats = new TableStats(120, 4, Map.of("id", idStats));
+            catalog.updateStats(t.tableId(), stats);
+
+            TableStats found = catalog.getStats("users");
+            assertEquals(120, found.numTuples());
+            assertEquals(4, found.numPages());
+            assertEquals(idStats, found.columnStats().get("id"));
+        }
+    }
+
+    @Test
+    void statsDefaultToTableCountsWhenNoneGathered() {
+        try (DiskManager dm = new DiskManager(tmp.resolve("o.db"))) {
+            Catalog catalog = new Catalog(pool(dm), dm);
+            catalog.createTable("users", usersSchema());
+
+            TableStats found = catalog.getStats("users");
+            assertEquals(0, found.numTuples());
+            assertTrue(found.columnStats().isEmpty());
+        }
+    }
+
+    @Test
+    void statsForUnknownTableAreNull() {
+        try (DiskManager dm = new DiskManager(tmp.resolve("p.db"))) {
+            Catalog catalog = new Catalog(pool(dm), dm);
+            assertNull(catalog.getStats("missing"));
         }
     }
 
