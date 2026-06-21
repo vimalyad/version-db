@@ -3,6 +3,7 @@ package com.minidb.wal;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.minidb.storage.BufferPool;
@@ -114,6 +115,107 @@ class RecoveryManagerTest {
             // Redo is idempotent: running it again changes nothing (page.lsn guards).
             rm.redo(log, a.dpt());
             assertArrayEquals(data, fetch(bp2, pid, slot));
+        } finally {
+            wal.close();
+            dm.close();
+        }
+    }
+
+    // ---- 6.3: Undo pass + full recover() -------------------------------------
+
+    @Test
+    void recoverUndoesUncommittedInsertThatReachedDisk() throws IOException {
+        DiskManager dm = new DiskManager(tmp.resolve("undo.db"));
+        WALManager wal = new WALManager(tmp.resolve("undo.wal"));
+        int pid;
+        int slot;
+        try {
+            BufferPool bp1 = new BufferPool(8, dm, wal::flushToLsn);
+            wal.logBegin(1);
+            Page p = bp1.newPage();
+            pid = p.getPageId();
+            slot = p.insertTuple(new byte[]{1, 2, 3});
+            long insLsn = wal.logInsert(1, pid, slot, new byte[]{1, 2, 3});
+            p.setLsn(insLsn);
+            bp1.unpin(pid, true);
+            bp1.flushPage(pid);  // uncommitted change reaches disk (and flushes WAL)
+            // crash: NO commit; abandon bp1
+
+            BufferPool bp2 = new BufferPool(8, dm, wal::flushToLsn);
+            RecoveryManager rm = new RecoveryManager(wal, bp2);
+            RecoveryManager.RecoveryResult result = rm.recover();
+
+            assertTrue(result.undone().contains(1L), "uncommitted txn must be rolled back");
+            assertNull(fetch(bp2, pid, slot), "undone insert must be gone");
+        } finally {
+            wal.close();
+            dm.close();
+        }
+    }
+
+    @Test
+    void recoverKeepsCommittedInsertAndUndoesConcurrentLoser() throws IOException {
+        DiskManager dm = new DiskManager(tmp.resolve("mix.db"));
+        WALManager wal = new WALManager(tmp.resolve("mix.wal"));
+        int pid;
+        int committedSlot;
+        int loserSlot;
+        try {
+            BufferPool bp1 = new BufferPool(8, dm, wal::flushToLsn);
+            Page p = bp1.newPage();
+            pid = p.getPageId();
+
+            // txn 1 commits its insert; txn 2 inserts on the same page but never commits.
+            wal.logBegin(1);
+            committedSlot = p.insertTuple(new byte[]{11});
+            p.setLsn(wal.logInsert(1, pid, committedSlot, new byte[]{11}));
+            wal.logBegin(2);
+            loserSlot = p.insertTuple(new byte[]{22});
+            p.setLsn(wal.logInsert(2, pid, loserSlot, new byte[]{22}));
+            bp1.unpin(pid, true);
+            bp1.flushPage(pid);   // both inserts reach disk
+            wal.logCommit(1);     // only txn 1 commits
+            // crash: abandon bp1
+
+            BufferPool bp2 = new BufferPool(8, dm, wal::flushToLsn);
+            RecoveryManager.RecoveryResult result = new RecoveryManager(wal, bp2).recover();
+
+            assertTrue(result.committed().contains(1L));
+            assertTrue(result.undone().contains(2L));
+            assertArrayEquals(new byte[]{11}, fetch(bp2, pid, committedSlot), "committed insert survives");
+            assertNull(fetch(bp2, pid, loserSlot), "loser insert is rolled back");
+        } finally {
+            wal.close();
+            dm.close();
+        }
+    }
+
+    @Test
+    void recoverIsIdempotent() throws IOException {
+        DiskManager dm = new DiskManager(tmp.resolve("idem.db"));
+        WALManager wal = new WALManager(tmp.resolve("idem.wal"));
+        int pid;
+        int slot;
+        try {
+            BufferPool bp1 = new BufferPool(8, dm, wal::flushToLsn);
+            wal.logBegin(1);
+            Page p = bp1.newPage();
+            pid = p.getPageId();
+            slot = p.insertTuple(new byte[]{9});
+            p.setLsn(wal.logInsert(1, pid, slot, new byte[]{9}));
+            bp1.unpin(pid, true);
+            bp1.flushPage(pid);   // uncommitted, on disk
+            // crash
+
+            BufferPool bp2 = new BufferPool(8, dm, wal::flushToLsn);
+            new RecoveryManager(wal, bp2).recover();   // undoes txn 1
+
+            // Re-run recovery: txn 1 is now resolved (aborted via CLR+abort), no-op.
+            BufferPool bp3 = new BufferPool(8, dm, wal::flushToLsn);
+            RecoveryManager.RecoveryResult second = new RecoveryManager(wal, bp3).recover();
+
+            assertTrue(second.undone().isEmpty(), "second recovery has no losers");
+            assertNull(fetch(bp3, pid, slot), "tuple stays deleted after re-recovery");
         } finally {
             wal.close();
             dm.close();
