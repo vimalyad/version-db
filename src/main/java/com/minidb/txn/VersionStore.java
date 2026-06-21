@@ -1,0 +1,104 @@
+package com.minidb.txn;
+
+import com.minidb.shared.RID;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+/**
+ * In-memory store of all {@link VersionRecord}s, implementing Option B
+ * (separate version store) from {@code part3.md §6.2}. The heap file holds
+ * only the current physical bytes for a slot; every historical and in-flight
+ * version lives here.
+ *
+ * <p><b>Storage.</b> Versions are kept in a single {@code ArrayList} so each
+ * version has a stable, monotonically-increasing {@code versionId} (its list
+ * index). A separate {@code chainHead} map records the head (most-recent)
+ * version id for each RID; chain traversal follows
+ * {@link VersionRecord#prevVersionId} links.
+ *
+ * <p><b>Thread safety.</b> The list and map are protected by a single
+ * {@link ReentrantReadWriteLock}: multiple readers share the read lock;
+ * allocations and head updates require the write lock. Per-RID conflict
+ * detection and xmax-stamping use the striped locks in
+ * {@link MVCCManager} and rely on the volatile xmin/xmax fields in
+ * {@link VersionRecord}.
+ */
+public final class VersionStore {
+
+    private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
+
+    /** All versions, indexed by versionId (= position in the list). */
+    private final List<VersionRecord> versions = new ArrayList<>();
+
+    /** Maps each RID to the versionId of its current (most-recent) chain head. */
+    private final Map<RID, Long> chainHead = new HashMap<>();
+
+    /**
+     * Store a new version record and return its assigned {@code versionId}.
+     */
+    public long allocate(VersionRecord record) {
+        rwLock.writeLock().lock();
+        try {
+            long id = versions.size();
+            versions.add(record);
+            return id;
+        } finally {
+            rwLock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Retrieve the version record with the given id.
+     *
+     * @throws IndexOutOfBoundsException if {@code versionId} is out of range
+     */
+    public VersionRecord get(long versionId) {
+        rwLock.readLock().lock();
+        try {
+            return versions.get((int) versionId);
+        } finally {
+            rwLock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Return the versionId of the head (most-recent) version for {@code rid},
+     * or {@code -1} if no version has been registered for this RID.
+     */
+    public long getHeadVersionId(RID rid) {
+        rwLock.readLock().lock();
+        try {
+            Long id = chainHead.get(rid);
+            return id == null ? -1L : id;
+        } finally {
+            rwLock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Set (or update) the chain head for {@code rid} to {@code versionId}.
+     * Called after INSERT and UPDATE to register the new latest version.
+     */
+    public void setHead(RID rid, long versionId) {
+        rwLock.writeLock().lock();
+        try {
+            chainHead.put(rid, versionId);
+        } finally {
+            rwLock.writeLock().unlock();
+        }
+    }
+
+    /** Total number of version records (across all chains). */
+    public int size() {
+        rwLock.readLock().lock();
+        try {
+            return versions.size();
+        } finally {
+            rwLock.readLock().unlock();
+        }
+    }
+}
