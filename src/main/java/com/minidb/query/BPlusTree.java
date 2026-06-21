@@ -296,6 +296,67 @@ public final class BPlusTree {
         }
     }
 
+    // ---- 13.4: range scan -----------------------------------------------------
+
+    /**
+     * Return the RIDs of all entries whose key is in {@code [low, high]}
+     * (inclusive), in ascending key order. A {@code null} bound is open: a null
+     * {@code low} scans from the smallest key, a null {@code high} to the
+     * largest. After an O(log n) descent to the starting leaf, this is a linear
+     * walk of the {@code nextLeaf} chain — O(log n + k) for k results.
+     */
+    public List<RID> rangeScan(Value low, Value high) {
+        List<RID> out = new ArrayList<>();
+        BTreeNode leaf = (low == null) ? leftmostLeaf() : findLeafForLowerBound(low);
+        int i = (low == null) ? 0 : lowerBound(leaf, low);
+        while (leaf != null) {
+            for (; i < leaf.keyCount(); i++) {
+                if (high != null && compare(leaf.keys.get(i), high) > 0) {
+                    return out;
+                }
+                out.add(leaf.rids.get(i));
+            }
+            int next = leaf.nextLeaf;
+            leaf = (next == Constants.INVALID_PAGE_ID) ? null : readNode(next);
+            i = 0;
+        }
+        return out;
+    }
+
+    /** Descend leftmost children to the first leaf. */
+    private BTreeNode leftmostLeaf() {
+        BTreeNode node = readNode(rootPageId);
+        while (!node.leaf) {
+            node = readNode(node.children.get(0));
+        }
+        return node;
+    }
+
+    /**
+     * Descend to the leftmost leaf that could contain {@code key}. Unlike
+     * {@link #findLeaf} (which routes right on an equal separator, fine for point
+     * lookup), this routes left on equality so a range scan does not skip equal
+     * keys that live in an earlier leaf — duplicates of a key can straddle the
+     * separator. The forward chain walk then collects all of them.
+     */
+    private BTreeNode findLeafForLowerBound(Value key) {
+        BTreeNode node = readNode(rootPageId);
+        while (!node.leaf) {
+            int lo = 0;
+            int hi = node.keyCount();
+            while (lo < hi) {
+                int mid = (lo + hi) >>> 1;
+                if (compare(key, node.keys.get(mid)) <= 0) {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            node = readNode(node.children.get(lo));
+        }
+        return node;
+    }
+
     private void validateKey(Value key) {
         if (key == null || key.isNull()) {
             throw new StorageException("B+Tree keys must be non-null");
