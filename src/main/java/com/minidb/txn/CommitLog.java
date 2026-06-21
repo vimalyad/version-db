@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.Set;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
@@ -130,6 +131,27 @@ public final class CommitLog implements AutoCloseable {
     /** O(1) convenience check used on the hot visibility path. */
     public boolean isCommitted(long xid) {
         return getStatus(xid) == TxStatus.COMMITTED;
+    }
+
+    /**
+     * Reconcile the commit log with the outcome of crash recovery. After ARIES
+     * recovery, transactions whose COMMIT record was in the WAL are marked
+     * COMMITTED and transactions that were rolled back are marked ABORTED — this
+     * repairs entries that a crash left as IN_PROGRESS because their commit-log
+     * write was lost. The two id sets are expected to be disjoint; if an id
+     * appears in both, the COMMITTED status wins (a durable COMMIT record is
+     * authoritative).
+     *
+     * @param committed transaction ids that committed (from {@code RecoveryResult.committed()})
+     * @param aborted   transaction ids that were undone (from {@code RecoveryResult.undone()})
+     */
+    public void reconcile(Set<Long> aborted, Set<Long> committed) {
+        for (long xid : aborted) {
+            setStatus(xid, TxStatus.ABORTED);
+        }
+        for (long xid : committed) {
+            setStatus(xid, TxStatus.COMMITTED);
+        }
     }
 
     @Override
