@@ -225,6 +225,48 @@ public final class Page {
         }
     }
 
+    // ---- Raw payload (index pages) --------------------------------------------
+
+    /**
+     * Largest payload that {@link #writePayload} accepts: the whole page body
+     * after the header, minus the 4-byte length prefix.
+     */
+    public static final int MAX_PAYLOAD_SIZE = Constants.PAGE_SIZE - HEADER_SIZE - Integer.BYTES;
+
+    /**
+     * Overwrite the page body in place with an opaque payload, length-prefixed.
+     * Unlike the slotted tuple operations, this rewrites the same bytes every
+     * time, so a page used as a single mutable record (e.g. a B+Tree node) does
+     * not accumulate abandoned bytes across updates. The page's slot/free-space
+     * header fields are not used by payload pages.
+     *
+     * @throws StorageException if the payload exceeds {@link #MAX_PAYLOAD_SIZE}
+     */
+    public void writePayload(byte[] payload) {
+        if (payload.length > MAX_PAYLOAD_SIZE) {
+            throw new StorageException("payload of " + payload.length
+                    + " bytes exceeds page capacity " + MAX_PAYLOAD_SIZE
+                    + " on page " + getPageId());
+        }
+        buf.putInt(HEADER_SIZE, payload.length);
+        System.arraycopy(payload, 0, data, HEADER_SIZE + Integer.BYTES, payload.length);
+    }
+
+    /**
+     * Read back the payload written by {@link #writePayload}. A freshly created
+     * page (all-zero body) returns an empty array.
+     *
+     * @throws StorageException if the stored length is invalid (corrupt page)
+     */
+    public byte[] readPayload() {
+        int len = buf.getInt(HEADER_SIZE);
+        if (len < 0 || len > MAX_PAYLOAD_SIZE) {
+            throw new StorageException("invalid payload length " + len + " on page " + getPageId());
+        }
+        int start = HEADER_SIZE + Integer.BYTES;
+        return Arrays.copyOfRange(data, start, start + len);
+    }
+
     // ---- Serialization --------------------------------------------------------
 
     /**
