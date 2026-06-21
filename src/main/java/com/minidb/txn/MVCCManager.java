@@ -147,6 +147,10 @@ public final class MVCCManager {
         long currentId = versionStore.getHeadVersionId(rid);
         while (currentId != -1) {
             VersionRecord ver = versionStore.get(currentId);
+            // The vacuum process tombstones reclaimed versions to null. A
+            // reclaimed version is invisible to every active transaction, so a
+            // null here is the effective end of the chain for this reader.
+            if (ver == null) break;
             if (isVisible(ver, txnXid, snapshot)) {
                 return ver.data;
             }
