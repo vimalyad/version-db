@@ -1,5 +1,6 @@
 package com.minidb.storage;
 
+import com.minidb.shared.ColumnDef;
 import com.minidb.shared.ColumnMeta;
 import com.minidb.shared.ColumnType;
 import com.minidb.shared.IndexMeta;
@@ -131,7 +132,66 @@ public final class Catalog {
         tablesById.put(table.tableId(), table);
     }
 
-    // ---- Record decoding ------------------------------------------------------
+    // ---- Tables and columns ---------------------------------------------------
+
+    /**
+     * Create a new table: allocate its heap file, assign a table id, and persist
+     * one record to the tables heap plus one record per column (in the given
+     * order) to the columns heap. The new metadata is cached immediately.
+     *
+     * @return the metadata for the created table
+     * @throws StorageException if a table with this name already exists
+     */
+    public synchronized TableMeta createTable(String name, List<ColumnDef> columns) {
+        if (tablesByName.containsKey(name)) {
+            throw new StorageException("table already exists: " + name);
+        }
+        int tableId = nextTableId++;
+        HeapFile heap = HeapFile.create(bufferPool);
+        TableMeta table = new TableMeta(tableId, name, heap.getFirstPageId(), 0L, heap.getPageCount());
+        tablesHeap.insertTuple(encodeTableMeta(table));
+        cacheTable(table);
+
+        List<ColumnMeta> columnMetas = new ArrayList<>(columns.size());
+        for (int i = 0; i < columns.size(); i++) {
+            ColumnDef def = columns.get(i);
+            ColumnMeta column = new ColumnMeta(tableId, def.name(), def.type(), i, def.nullable());
+            columnsHeap.insertTuple(encodeColumnMeta(column));
+            columnMetas.add(column);
+        }
+        columnsByTableId.put(tableId, columnMetas);
+        return table;
+    }
+
+    /** @return the table's metadata, or {@code null} if no such table exists. */
+    public TableMeta getTable(String name) {
+        return tablesByName.get(name);
+    }
+
+    /**
+     * @return the table's columns in row order (by column index); an empty list
+     *         if the table is unknown or has no columns.
+     */
+    public List<ColumnMeta> getColumns(int tableId) {
+        List<ColumnMeta> columns = columnsByTableId.get(tableId);
+        return columns == null ? List.of() : List.copyOf(columns);
+    }
+
+    // ---- Record encoding / decoding -------------------------------------------
+
+    private static byte[] encodeTableMeta(TableMeta t) {
+        return TupleCodec.encode(List.of(
+                Value.ofInt(t.tableId()), Value.ofString(t.tableName()),
+                Value.ofInt(t.firstPageId()), Value.ofInt(t.numTuples()),
+                Value.ofInt(t.numPages())), TABLES_SCHEMA);
+    }
+
+    private static byte[] encodeColumnMeta(ColumnMeta c) {
+        return TupleCodec.encode(List.of(
+                Value.ofInt(c.tableId()), Value.ofString(c.columnName()),
+                Value.ofString(c.columnType().name()), Value.ofInt(c.columnIndex()),
+                Value.ofBool(c.isNullable())), COLUMNS_SCHEMA);
+    }
 
     private static TableMeta decodeTableMeta(byte[] data) {
         List<Value> v = TupleCodec.decode(data, TABLES_SCHEMA);
