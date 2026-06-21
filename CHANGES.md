@@ -22,7 +22,7 @@ How to use it:
 | 3 — Heap File | `phase-03-heapfile` | M1 | done |
 | 4 — Catalog | `phase-04-catalog` | M1 | done |
 | 5 — WAL Manager | `phase-05-wal` | M1 | done |
-| 6 — Recovery (ARIES) | `phase-06-recovery` | M1 | not started |
+| 6 — Recovery (ARIES) | `phase-06-recovery` | M1 | in progress |
 | 7 — Commit Log | `phase-07-commitlog` | M3 | not started |
 | 8 — Transaction Manager | `phase-08-txnmgr` | M3 | not started |
 | 9 — Snapshot Manager | `phase-09-snapshot` | M3 | not started |
@@ -105,3 +105,7 @@ Newest entries at the top. Format per entry:
 - [2026-06-21] 5.3 — Append operations: `logBegin`, `logInsert`, `logDelete`, `logCommit` (synchronous flush), `logAbort` (synchronous flush), `logClr`, `logCheckpoint` (synchronous flush). Each assigns the next LSN, chains `prevLsn` from `txnLastLsn`, appends a length-prefixed record to `logBuffer`, and auto-flushes if the buffer exceeds 64 KB. `flushUnlocked()` drains the buffer to disk under `walFile` synchronization and updates `flushedLsn`; lock is released around I/O. Files: `wal/WALManager.java`, `test/.../wal/WALManagerTest.java`.
 - [2026-06-21] 5.4 — `flushToLsn(targetLsn)` implements `WalFlushCallback`; no-op if `targetLsn <= flushedLsn`, else flushes the buffer. BufferPool tests now wire the real `WALManager::flushToLsn` as the `WalFlushCallback`, verifying that the WAL rule holds on both explicit `flushPage` and clock eviction of a dirty frame. Files: `wal/WALManager.java`, `test/.../wal/WALManagerTest.java`.
 - [2026-06-21] 5.5 — Read side: `readLog(startLsn)` returns a lazy `Iterator<LogRecord>` that opens a fresh file handle, scans length-prefixed records, and yields those with `lsn >= startLsn`; `readRecordAtLsn(lsn)` uses the in-memory `lsnToFileOffset` map for a direct seek. Both flush the buffer first. Restart test writes records, closes, reopens, and verifies records are recovered and LSN sequence continues. Files: `wal/WALManager.java`, `test/.../wal/WALManagerTest.java`. **Phase 5 complete** (116 tests green).
+
+### Phase 6 — Recovery (ARIES)  (branch: phase-06-recovery)
+- [2026-06-21] fix — `WALManagerTest.readLogFromStartLsn` read only the first record and abandoned the `readLog` iterator, leaking its file handle; on Windows the open handle blocked `@TempDir` cleanup and failed the test. Drained the iterator so it closes the handle. (Cross-phase fix needed for a green baseline before Phase 6.) Files: `test/.../wal/WALManagerTest.java`.
+- [2026-06-21] 6.1 — `wal/RecoveryManager` Analysis pass: `analyze(log)` (pure, static) rebuilds the Active Transaction Table (`txnId→lastLsn`, the undo "losers") and Dirty Page Table (`pageId→first-dirtying recLsn`), seeding both from the most recent CHECKPOINT and scanning forward; also collects the committed-txn set. `readAllRecords()` drains the WAL into memory. Files: `wal/RecoveryManager.java`, `test/.../wal/RecoveryManagerTest.java`.
