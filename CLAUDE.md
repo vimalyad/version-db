@@ -112,3 +112,4 @@ The coordination files themselves (`CLAUDE.md`, `implementation.md`, `CHANGES.md
 - `RID = {pageId, slotId}` is the shared tuple address used across all three layers. It is defined once in `shared/` and is opaque/stable.
 - Prefer clear, debuggable code over cleverness — this is an academic project that must be explainable in a viva.
 - New code comes with tests in the same sub-phase.
+- **Never reference "member-1/2/3", "Member 1/2/3", or "M1/M2/M3" in code** — not in identifiers, comments, Javadoc, or package-info. Those labels belong only to the coordination docs. Describe components by what they do (e.g. "storage layer"), not by which person owns them.

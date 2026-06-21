@@ -16,7 +16,7 @@ How to use it:
 
 | Phase | Branch | Owner | Status |
 |---|---|---|---|
-| 0 — Foundation | `phase-00-foundation` | shared | not started |
+| 0 — Foundation | `phase-00-foundation` | shared | done |
 | 1 — Page & DiskManager | `phase-01-storage-page` | M1 | not started |
 | 2 — Buffer Pool | `phase-02-bufferpool` | M1 | not started |
 | 3 — Heap File | `phase-03-heapfile` | M1 | not started |
@@ -41,7 +41,7 @@ How to use it:
 Record cross-cutting decisions here as they are made. Seeded with the ones already fixed in the plan:
 
 - **Language/build:** Java 17, Maven, JUnit 5.
-- **PAGE_SIZE:** _to be fixed in sub-phase 0.2_ (choose 4096 or 8192 and record the value here).
+- **PAGE_SIZE:** fixed at **8192** bytes (`Constants.PAGE_SIZE`) in sub-phase 0.2. Matches PostgreSQL's default page size; never change for an existing database file.
 - **Version storage:** MVCC uses **Option B — separate Version Store** (heap stays MVCC-agnostic), per `part3.md` §6.2 and `implementation.md` Phase 10.
 - **Isolation default:** Snapshot Isolation (REPEATABLE READ semantics); READ COMMITTED via per-statement snapshots. SSI is out of scope.
 
@@ -59,5 +59,15 @@ Newest entries at the top. Format per entry:
 ### Project setup  (no branch / planning)
 - [2026-06-21] Added architecture design docs `part1.md`, `part2.md`, `part3.md` (Member 1 Storage & Recovery, Member 2 Query & Indexing, Member 3 Transactions & MVCC).
 - [2026-06-21] Added coordination files: `CLAUDE.md` (project context + workflow + attribution rule), `implementation.md` (16-phase build plan), `CHANGES.md` (this file).
+
+### Phase 0 — Foundation  (branch: phase-00-foundation)
+- [2026-06-21] 0.1 — Maven project (Java 17 target, JUnit 5, surefire), package skeleton `com.minidb.{shared,storage,wal,txn,query}` via package-info, and a smoke test proving the harness runs. Files: `pom.xml`, `src/main/java/com/minidb/*/package-info.java`, `src/test/java/com/minidb/SmokeTest.java`.
+
+- [2026-06-21] 0.2 — Shared `Constants` (PAGE_SIZE=8192, sentinel XID/page/slot ids) and the `RID` record (pageId, slotId) with value equality and validity check. Files: `shared/Constants.java`, `shared/RID.java`, `test/.../shared/RidTest.java`.
+
+- [2026-06-21] 0.3 — `ColumnType` enum (INT/FLOAT/VARCHAR/BOOL), immutable `Value` (typed value or typed NULL with checked accessors), and `ColumnDef` record (name, type, nullable). Files: `shared/ColumnType.java`, `shared/Value.java`, `shared/ColumnDef.java`, `test/.../shared/ValueTest.java`.
+
+- [2026-06-21] 0.4 — Metadata records: `TableMeta`, `ColumnMeta`, `IndexMeta`, `ColumnStats`, and `TableStats` (defensively-copied, unmodifiable column-stats map). Files: `shared/TableMeta.java`, `shared/ColumnMeta.java`, `shared/IndexMeta.java`, `shared/ColumnStats.java`, `shared/TableStats.java`, `test/.../shared/MetadataTest.java`.
+- [2026-06-21] 0.5 — Exception hierarchy: `MiniDbException` (unchecked base) with `StorageException`, `ParseException`, `SerializationException`, `TransactionConflictException`. Files: `shared/MiniDbException.java` + the four subclasses, `test/.../shared/ExceptionTest.java`. **Phase 0 complete** (17 tests green).
 
 <!-- Add real phase work below this line as it is implemented. -->
