@@ -51,4 +51,92 @@ public final class BufferPool {
     public int capacity() {
         return frames.length;
     }
+
+    /**
+     * Bring a page into the pool, pinning it. If the page is already in the
+     * pool, increment its pin count and return the cached page. If not, load
+     * it from disk into a free frame. The caller must call {@link #unpin} when
+     * done.
+     */
+    public Page fetchPage(int pageId) {
+        Integer idx = pageTable.get(pageId);
+        if (idx != null) {
+            Frame f = frames[idx];
+            f.pinCount++;
+            f.refBit = true;
+            return f.page;
+        }
+
+        // Cache miss — find a free frame (eviction added in 2.3)
+        int freeIdx = findFreeFrame();
+        if (freeIdx == -1) {
+            throw new StorageException(
+                    "buffer pool full: no free frame available (pool size " + frames.length + ")");
+        }
+        Frame f = frames[freeIdx];
+        f.page = diskManager.readPage(pageId);
+        f.pageId = pageId;
+        f.pinCount = 1;
+        f.isDirty = false;
+        f.refBit = true;
+        pageTable.put(pageId, freeIdx);
+        return f.page;
+    }
+
+    /**
+     * Decrement the pin count for a page. If {@code dirty} is true, mark the
+     * frame dirty so it will be flushed before eviction.
+     */
+    public void unpin(int pageId, boolean dirty) {
+        Integer idx = pageTable.get(pageId);
+        if (idx == null) {
+            throw new StorageException("unpin: page " + pageId + " not in buffer pool");
+        }
+        Frame f = frames[idx];
+        if (f.pinCount <= 0) {
+            throw new StorageException("unpin: page " + pageId + " pin count is already 0");
+        }
+        f.pinCount--;
+        if (dirty) {
+            f.isDirty = true;
+        }
+    }
+
+    /** Mark a page dirty — it has been modified and must be flushed before eviction. */
+    public void markDirty(int pageId) {
+        Integer idx = pageTable.get(pageId);
+        if (idx == null) {
+            throw new StorageException("markDirty: page " + pageId + " not in buffer pool");
+        }
+        frames[idx].isDirty = true;
+    }
+
+    /**
+     * Allocate a new page via the disk manager, bring it into the pool pinned,
+     * and return it. The caller must call {@link #unpin} when done.
+     */
+    public Page newPage() {
+        int newPageId = diskManager.allocatePage();
+        int freeIdx = findFreeFrame();
+        if (freeIdx == -1) {
+            throw new StorageException(
+                    "buffer pool full: no free frame for new page (pool size " + frames.length + ")");
+        }
+        Frame f = frames[freeIdx];
+        f.page = diskManager.readPage(newPageId);
+        f.pageId = newPageId;
+        f.pinCount = 1;
+        f.isDirty = false;
+        f.refBit = true;
+        pageTable.put(newPageId, freeIdx);
+        return f.page;
+    }
+
+    /** Scan for a frame with pageId == -1 (empty). Returns -1 if none found. */
+    private int findFreeFrame() {
+        for (int i = 0; i < frames.length; i++) {
+            if (frames[i].pageId == -1) return i;
+        }
+        return -1;
+    }
 }

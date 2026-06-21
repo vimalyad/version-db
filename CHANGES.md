@@ -80,3 +80,4 @@ Newest entries at the top. Format per entry:
 
 ### Phase 2 — Buffer Pool  (branch: phase-02-bufferpool)
 - [2026-06-21] 2.1 — `storage/Frame` (pageId, page, pinCount, isDirty, refBit) with all fields defaulting to empty-slot state; `storage/BufferPool` constructor: fixed-size `Frame[]` array and `HashMap<Integer,Integer>` page table; `storage/WalFlushCallback` functional interface for the WAL-rule hook (no-op stub until Phase 5). Files: `storage/Frame.java`, `storage/WalFlushCallback.java`, `storage/BufferPool.java`, `test/.../storage/BufferPoolTest.java`.
+- [2026-06-21] 2.2 — `fetchPage(pageId)` (cache hit returns pinned page, miss reads from disk into first free frame), `unpin(pageId, dirty)`, `markDirty(pageId)`, `newPage()` (allocates via DiskManager, loads into free frame pinned). Eviction deferred to 2.3; full pool throws `StorageException`. Files: `storage/BufferPool.java`, `test/.../storage/BufferPoolTest.java`.
