@@ -1,0 +1,30 @@
+# Build output
+target/
+build/
+out/
+*.class
+
+# Maven
+.mvn/
+!.mvn/wrapper/maven-wrapper.jar
+dependency-reduced-pom.xml
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs / local DB artifacts
+*.log
+*.clog
+*.wal
+wal.log
+data/
+*.db
