@@ -137,6 +137,27 @@ class PageTest {
     }
 
     @Test
+    void corruptedBodyIsDetectedOnDeserialize() {
+        Page page = Page.create(3);
+        page.insertTuple(new byte[] {1, 2, 3, 4});
+        byte[] image = page.serialize().clone();
+
+        // Flip a byte in the body (past the header) to simulate corruption.
+        image[Constants.PAGE_SIZE - 1] ^= 0xFF;
+        assertThrows(StorageException.class, () -> Page.deserialize(image));
+    }
+
+    @Test
+    void cleanPagePassesChecksumVerification() {
+        Page page = Page.create(4);
+        page.insertTuple(new byte[] {5, 6, 7});
+        byte[] image = page.serialize().clone();
+        // Round-trips without throwing.
+        Page restored = Page.deserialize(image);
+        assertArrayEquals(new byte[] {5, 6, 7}, restored.getTuple(0));
+    }
+
+    @Test
     void pageCanBeFilledUntilFull() {
         Page page = Page.create(1);
         byte[] tuple = new byte[100];
