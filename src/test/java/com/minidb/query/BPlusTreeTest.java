@@ -6,6 +6,8 @@ import com.minidb.shared.RID;
 import com.minidb.shared.Value;
 import com.minidb.storage.BufferPool;
 import com.minidb.storage.DiskManager;
+import com.minidb.storage.HeapFile;
+import com.minidb.storage.TupleCodec;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -525,6 +527,68 @@ class BPlusTreeTest {
             } else {
                 assertEquals(new RID(i, 0), tree.search(Value.ofInt(i)));
             }
+        }
+    }
+
+    // ---- 13.6: bulk build for CREATE INDEX -----------------------------------
+
+    @Test
+    void buildIndexFromHeapScan() {
+        BufferPool bp = newPool(32);
+        HeapFile heap = HeapFile.create(bp);
+        List<ColumnType> schema = List.of(ColumnType.INT, ColumnType.VARCHAR);
+
+        java.util.Map<Integer, RID> rids = new java.util.HashMap<>();
+        for (int i = 0; i < 60; i++) {
+            byte[] row = TupleCodec.encode(List.of(Value.ofInt(i), Value.ofString("name" + i)), schema);
+            rids.put(i, heap.insertTuple(row));
+        }
+
+        // Index over the INT column (index 0).
+        BPlusTree intIndex = BPlusTree.build(bp, heap, schema, 0);
+        for (int i = 0; i < 60; i++) {
+            assertEquals(rids.get(i), intIndex.search(Value.ofInt(i)), "int key " + i);
+        }
+        assertEquals(60, intIndex.rangeScan(null, null).size());
+        assertEquals(11, intIndex.rangeScan(Value.ofInt(10), Value.ofInt(20)).size());
+
+        // Index over the VARCHAR column (index 1).
+        BPlusTree strIndex = BPlusTree.build(bp, heap, schema, 1);
+        assertEquals(rids.get(7), strIndex.search(Value.ofString("name7")));
+        assertEquals(60, strIndex.rangeScan(null, null).size());
+    }
+
+    @Test
+    void buildIndexSkipsNullKeys() {
+        BufferPool bp = newPool(16);
+        HeapFile heap = HeapFile.create(bp);
+        List<ColumnType> schema = List.of(ColumnType.INT, ColumnType.VARCHAR);
+
+        heap.insertTuple(TupleCodec.encode(List.of(Value.ofInt(1), Value.ofString("a")), schema));
+        heap.insertTuple(TupleCodec.encode(List.of(Value.nullValue(ColumnType.INT), Value.ofString("b")), schema));
+        heap.insertTuple(TupleCodec.encode(List.of(Value.ofInt(3), Value.ofString("c")), schema));
+
+        BPlusTree index = BPlusTree.build(bp, heap, schema, 0);
+        assertEquals(2, index.rangeScan(null, null).size()); // null key not indexed
+        assertNotNull(index.search(Value.ofInt(1)));
+        assertNotNull(index.search(Value.ofInt(3)));
+    }
+
+    @Test
+    void builtIndexReopensFromRootPageId() {
+        BufferPool bp = newPool(16);
+        HeapFile heap = HeapFile.create(bp);
+        List<ColumnType> schema = List.of(ColumnType.INT);
+        for (int i = 0; i < 40; i++) {
+            heap.insertTuple(TupleCodec.encode(List.of(Value.ofInt(i)), schema));
+        }
+        BPlusTree built = BPlusTree.build(bp, heap, schema, 0);
+        int rootId = built.getRootPageId();
+        bp.flushAll();
+
+        BPlusTree reopened = BPlusTree.open(bp, ColumnType.INT, rootId);
+        for (int i = 0; i < 40; i++) {
+            assertNotNull(reopened.search(Value.ofInt(i)), "key " + i + " after reopen");
         }
     }
 
