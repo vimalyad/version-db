@@ -23,7 +23,7 @@ How to use it:
 | 4 — Catalog | `phase-04-catalog` | M1 | done |
 | 5 — WAL Manager | `phase-05-wal` | M1 | done |
 | 6 — Recovery (ARIES) | `phase-06-recovery` | M1 | done (6.5 deferred to Phase 7) |
-| 7 — Commit Log | `phase-07-commitlog` | M3 | not started |
+| 7 — Commit Log | `phase-07-commitlog` | M3 | in progress |
 | 8 — Transaction Manager | `phase-08-txnmgr` | M3 | not started |
 | 9 — Snapshot Manager | `phase-09-snapshot` | M3 | not started |
 | 10 — MVCC Manager | `phase-10-mvcc` | M3 | not started |
@@ -45,6 +45,7 @@ Record cross-cutting decisions here as they are made. Seeded with the ones alrea
 - **Version storage:** MVCC uses **Option B — separate Version Store** (heap stays MVCC-agnostic), per `part3.md` §6.2 and `implementation.md` Phase 10.
 - **Isolation default:** Snapshot Isolation (REPEATABLE READ semantics); READ COMMITTED via per-statement snapshots. SSI is out of scope.
 - **Catalog statistics (Phase 4):** only the three system heaps from `part1.md` §6.2 (tables/columns/indexes) are persisted. Per-column `ColumnStats` are held in an in-memory cache (the execution engine recomputes them periodically per §6.4); persisted table counts live in `TableMeta`. Catalog metadata records are encoded with the shared `TupleCodec` against fixed per-heap schemas (column type stored as its enum name).
+- **`TxStatus` introduced in Phase 7 (planned for 8.1):** the `CommitLog` public API returns a transaction-status type, so `txn/TxStatus` (IN_PROGRESS/COMMITTED/ABORTED, 2-bit codes) is created in Phase 7. The Transaction Manager (Phase 8) reuses this same enum rather than defining its own.
 
 ---
 
@@ -113,3 +114,6 @@ Newest entries at the top. Format per entry:
 - [2026-06-21] 6.3 — Undo pass + full `recover()` + public `RecoveryResult(committed, undone)`. `undo(log, att)` rolls back losers newest-first via a max-heap of LSNs: each undone INSERT/DELETE writes a CLR (with `undoNextLsn = prevLsn`) and applies the compensating action; CLRs are skipped (resume at `undoNextLsn`); reaching a BEGIN emits ABORT. `recover()` runs Analysis→Redo→Undo then `flushAll()`, and is idempotent. End-to-end crash tests: uncommitted-insert-on-disk is undone; committed insert survives while a concurrent loser on the same page is rolled back; re-running recovery is a no-op. Files: `wal/RecoveryManager.java`, `test/.../wal/RecoveryManagerTest.java`.
 - [2026-06-21] 6.4 — `checkpoint(att, dpt)`: flush all dirty pages, then log a CHECKPOINT capturing the supplied ATT/DPT so Analysis can start there. Test confirms the checkpoint flushes a dirty page (a fresh pool reads it from disk with no recovery) and that Analysis seeds from the logged checkpoint. Files: `wal/RecoveryManager.java`, `test/.../wal/RecoveryManagerTest.java`. **Phase 6 complete** (129 tests green).
 - [2026-06-21] 6.5 — **Deferred to Phase 7.** Commit-log reconciliation needs the CommitLog (Phase 7), which is not built yet. `recover()` already returns `RecoveryResult{committed, undone}` — the exact hook Phase 7 / integration will use to mark recovered transactions COMMITTED/ABORTED in the commit log. No code change now; to be wired when Phase 7 lands.
+
+### Phase 7 — Commit Log  (branch: phase-07-commitlog)
+- [2026-06-21] 7.1 — `txn/TxStatus` enum (IN_PROGRESS/COMMITTED/ABORTED with 2-bit codes 0/1/2; `code()`/`fromCode()`, reserved 0b11 throws) and `txn/CommitLog`: persistent 2-bit-per-xid status array in `commit_log.clog`, mirrored in an in-memory buffer. `getStatus(xid)` reads from the buffer in O(1) (default IN_PROGRESS beyond the array end), `setStatus(xid, status)` packs into byte `xid/4` at bit `(xid%4)*2` and grows the buffer as needed; negative ids rejected. Files: `txn/TxStatus.java`, `txn/CommitLog.java`, `test/.../txn/CommitLogTest.java`.
