@@ -222,6 +222,44 @@ class RecoveryManagerTest {
         }
     }
 
+    // ---- 6.4: Checkpoint -----------------------------------------------------
+
+    @Test
+    void checkpointFlushesDirtyPagesAndLogsCheckpoint() throws IOException {
+        DiskManager dm = new DiskManager(tmp.resolve("cp.db"));
+        WALManager wal = new WALManager(tmp.resolve("cp.wal"));
+        byte[] data = {7, 7};
+        int pid;
+        int slot;
+        try {
+            BufferPool bp1 = new BufferPool(8, dm, wal::flushToLsn);
+            wal.logBegin(1);
+            Page p = bp1.newPage();
+            pid = p.getPageId();
+            slot = p.insertTuple(data);
+            long insLsn = wal.logInsert(1, pid, slot, data);
+            p.setLsn(insLsn);
+            bp1.unpin(pid, true);   // dirty, not yet on disk
+
+            RecoveryManager rm = new RecoveryManager(wal, bp1);
+            long cpLsn = rm.checkpoint(Map.of(1L, insLsn), Map.of(pid, insLsn));
+
+            // The page was flushed by the checkpoint, so a fresh pool reads it
+            // straight from disk with no recovery needed.
+            BufferPool bp2 = new BufferPool(8, dm, wal::flushToLsn);
+            assertArrayEquals(data, fetch(bp2, pid, slot), "checkpoint must flush dirty pages");
+
+            // The checkpoint record is in the log and seeds Analysis.
+            RecoveryManager.Analysis a = RecoveryManager.analyze(rm.readAllRecords());
+            assertEquals(insLsn, a.att().get(1L), "checkpoint seeds the still-active txn");
+            assertTrue(a.dpt().containsKey(pid));
+            assertTrue(cpLsn > insLsn);
+        } finally {
+            wal.close();
+            dm.close();
+        }
+    }
+
     private static byte[] fetch(BufferPool bp, int pageId, int slotId) {
         Page page = bp.fetchPage(pageId);
         try {

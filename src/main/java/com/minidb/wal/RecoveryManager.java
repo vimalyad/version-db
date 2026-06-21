@@ -67,6 +67,20 @@ public final class RecoveryManager {
         return new RecoveryResult(analysis.committed(), undone);
     }
 
+    /**
+     * Write a checkpoint: flush all dirty pages to disk, then log a CHECKPOINT
+     * record capturing the caller-supplied Active Transaction Table and Dirty
+     * Page Table. Because dirty pages are flushed first, recovery can safely
+     * begin Analysis from this record. The {@code att}/{@code dpt} are supplied
+     * by the transaction manager and buffer pool at the integration layer.
+     *
+     * @return the LSN of the checkpoint record
+     */
+    public long checkpoint(Map<Long, Long> activeTxnTable, Map<Integer, Long> dirtyPageTable) {
+        bufferPool.flushAll();
+        return wal.logCheckpoint(activeTxnTable, dirtyPageTable);
+    }
+
     /** Read the entire log into memory, fully draining the iterator. */
     List<LogRecord> readAllRecords() {
         List<LogRecord> all = new ArrayList<>();
