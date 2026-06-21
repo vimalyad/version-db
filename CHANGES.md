@@ -19,7 +19,7 @@ How to use it:
 | 0 — Foundation | `phase-00-foundation` | shared | done |
 | 1 — Page & DiskManager | `phase-01-storage-page` | M1 | done |
 | 2 — Buffer Pool | `phase-02-bufferpool` | M1 | done |
-| 3 — Heap File | `phase-03-heapfile` | M1 | in progress |
+| 3 — Heap File | `phase-03-heapfile` | M1 | done |
 | 4 — Catalog | `phase-04-catalog` | M1 | not started |
 | 5 — WAL Manager | `phase-05-wal` | M1 | not started |
 | 6 — Recovery (ARIES) | `phase-06-recovery` | M1 | not started |
@@ -90,3 +90,4 @@ Newest entries at the top. Format per entry:
 - [2026-06-21] 3.2 — Free Space Map: `freeSpaceMap` (pageId → free bytes) built during the chain walk in `rebuild()` and queryable via the package-private `freeSpaceOf(pageId)`. Lets an insert choose a page in O(pages) without reading page contents. (Deletes tombstone a slot without reclaiming space, so free space is unchanged on delete.) Files: `storage/HeapFile.java`, `test/.../storage/HeapFileTest.java`.
 - [2026-06-21] 3.3 — Tuple ops: `insertTuple(bytes)→RID` (FSM picks a page, else `appendNewPage()` allocates and links a new tail page; rejects tuples larger than `MAX_TUPLE_SIZE`), `getTuple(rid)` (null on tombstone), `deleteTuple(rid)` (tombstone, space kept for MVCC). FSM updated after each insert. Files: `storage/HeapFile.java`, `test/.../storage/HeapFileTest.java`.
 - [2026-06-21] 3.4 — `scan()` returns an `Iterator<HeapFile.Entry>` (Entry = RID + bytes) that walks the page chain via `nextPageId`, yields one entry per live slot and skips tombstones. Loads one page at a time, unpinning after each, so at most one page is pinned during a scan. Files: `storage/HeapFile.java`, `test/.../storage/HeapFileTest.java`.
+- [2026-06-21] 3.5 — `storage/TupleCodec`: the shared tuple binary format — a null bitmap (one bit/column) followed by non-null column values (INT 8B big-endian, FLOAT 8B IEEE-754, BOOL 1B, VARCHAR 4B length + UTF-8). `encode(values, types)` / `decode(bytes, types)`; mismatched count or wrong value type throws `SerializationException`. This is the (de)serialization contract used by the query and txn layers. Files: `storage/TupleCodec.java`, `test/.../storage/TupleCodecTest.java`. **Phase 3 complete** (80 tests green).
