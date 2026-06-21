@@ -1,8 +1,10 @@
 package com.minidb.storage;
 
 import com.minidb.shared.Constants;
+import com.minidb.shared.StorageException;
 
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 
 /**
  * A single fixed-size ({@link Constants#PAGE_SIZE}) page: the atomic unit of
@@ -105,6 +107,82 @@ public final class Page {
 
     private int getFreeSpaceEnd() {
         return buf.getInt(OFF_FREE_SPACE_END);
+    }
+
+    // ---- Tuple / slot operations ----------------------------------------------
+
+    /**
+     * Bytes available for the next insert: the gap between the slot array and the
+     * tuple data, minus the slot entry a new tuple would itself require.
+     */
+    public int getFreeSpace() {
+        return getFreeSpaceEnd() - getFreeSpaceStart() - SLOT_SIZE;
+    }
+
+    /**
+     * Append a tuple to this page. The tuple bytes are written growing backward
+     * from the end of the free space and a new slot entry is appended growing
+     * forward. Existing tuples never move.
+     *
+     * @return the slot id of the new tuple (an index into the slot array)
+     * @throws StorageException if the tuple plus its slot do not fit
+     */
+    public int insertTuple(byte[] tuple) {
+        if (tuple.length > getFreeSpace()) {
+            throw new StorageException("tuple of " + tuple.length
+                    + " bytes does not fit in page " + getPageId()
+                    + " (free space " + getFreeSpace() + ")");
+        }
+        int newDataOffset = getFreeSpaceEnd() - tuple.length;
+        System.arraycopy(tuple, 0, data, newDataOffset, tuple.length);
+
+        int slotId = getNumSlots();
+        int slotPos = HEADER_SIZE + slotId * SLOT_SIZE;
+        buf.putInt(slotPos, newDataOffset);
+        buf.putInt(slotPos + 4, tuple.length);
+
+        buf.putInt(OFF_FREE_SPACE_END, newDataOffset);
+        buf.putInt(OFF_FREE_SPACE_START, slotPos + SLOT_SIZE);
+        buf.putInt(OFF_NUM_SLOTS, slotId + 1);
+        return slotId;
+    }
+
+    /**
+     * Read the tuple at the given slot.
+     *
+     * @return the tuple bytes, or {@code null} if the slot is a tombstone
+     *         (deleted)
+     * @throws StorageException if the slot id is out of range
+     */
+    public byte[] getTuple(int slotId) {
+        int slotPos = slotPosition(slotId);
+        int offset = buf.getInt(slotPos);
+        if (offset == TOMBSTONE_OFFSET) {
+            return null;
+        }
+        int length = buf.getInt(slotPos + 4);
+        return Arrays.copyOfRange(data, offset, offset + length);
+    }
+
+    /**
+     * Mark the slot as a tombstone. The tuple bytes are left physically in place
+     * — MVCC version chains may still reach them — only the slot's offset is
+     * cleared so the tuple becomes logically invisible. Space is reclaimed later
+     * by garbage collection, not here.
+     *
+     * @throws StorageException if the slot id is out of range
+     */
+    public void deleteTuple(int slotId) {
+        int slotPos = slotPosition(slotId);
+        buf.putInt(slotPos, TOMBSTONE_OFFSET);
+    }
+
+    private int slotPosition(int slotId) {
+        if (slotId < 0 || slotId >= getNumSlots()) {
+            throw new StorageException("slot id " + slotId + " out of range on page "
+                    + getPageId() + " (numSlots " + getNumSlots() + ")");
+        }
+        return HEADER_SIZE + slotId * SLOT_SIZE;
     }
 
     // ---- Serialization --------------------------------------------------------
