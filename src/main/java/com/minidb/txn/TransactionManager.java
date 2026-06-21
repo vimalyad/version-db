@@ -92,15 +92,26 @@ public final class TransactionManager {
     // -------------------------------------------------------------------------
 
     /**
-     * Begin a new transaction. Atomically assigns an XID, captures an
-     * immutable snapshot of current transaction activity, logs a WAL BEGIN
-     * record, and registers the transaction as active.
+     * Begin a new transaction at the default isolation level
+     * ({@link IsolationLevel#DEFAULT}, i.e. Snapshot Isolation).
+     */
+    public Transaction beginTransaction() {
+        return beginTransaction(IsolationLevel.DEFAULT);
+    }
+
+    /**
+     * Begin a new transaction at the given isolation level. Atomically assigns
+     * an XID, captures an immutable begin-time snapshot of current transaction
+     * activity, logs a WAL BEGIN record, and registers the transaction as
+     * active.
      *
      * <p>The snapshot reflects the exact set of active XIDs at the moment the
      * XID was assigned, so no concurrent begin/commit can produce a
-     * partially-visible view.
+     * partially-visible view. Under {@link IsolationLevel#READ_COMMITTED} this
+     * begin-time snapshot is later refreshed per statement by
+     * {@link #snapshotForStatement(Transaction)}.
      */
-    public Transaction beginTransaction() {
+    public Transaction beginTransaction(IsolationLevel isolationLevel) {
         long xid;
         Snapshot snapshot;
 
@@ -122,7 +133,7 @@ public final class TransactionManager {
         // consistency while we do the disk write.
         walManager.logBegin(xid);
 
-        Transaction txn = new Transaction(xid, snapshot);
+        Transaction txn = new Transaction(xid, snapshot, isolationLevel);
 
         txnLock.lock();
         try {
@@ -132,6 +143,33 @@ public final class TransactionManager {
         }
 
         return txn;
+    }
+
+    // -------------------------------------------------------------------------
+    // 9.3 — per-statement snapshot (isolation-level switch)
+    // -------------------------------------------------------------------------
+
+    /**
+     * The snapshot a statement of {@code txn} should read against, applying the
+     * transaction's isolation level. Called by the execution engine at each
+     * statement boundary.
+     *
+     * <ul>
+     *   <li>{@link IsolationLevel#REPEATABLE_READ} — returns the stable
+     *       begin-time snapshot unchanged, so every statement sees the same
+     *       consistent view.</li>
+     *   <li>{@link IsolationLevel#READ_COMMITTED} — captures a fresh snapshot,
+     *       installs it as the transaction's current snapshot, and returns it,
+     *       so this statement observes everything committed before it began.</li>
+     * </ul>
+     */
+    public Snapshot snapshotForStatement(Transaction txn) {
+        if (txn.isolationLevel == IsolationLevel.READ_COMMITTED) {
+            Snapshot fresh = snapshotManager.createSnapshot();
+            txn.setSnapshot(fresh);
+            return fresh;
+        }
+        return txn.getSnapshot();
     }
 
     // -------------------------------------------------------------------------
