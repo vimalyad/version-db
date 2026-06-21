@@ -401,6 +401,133 @@ class BPlusTreeTest {
         assertEquals(10, tree.rangeScan(Value.ofInt(4), Value.ofInt(6)).size());
     }
 
+    // ---- 13.5: delete + borrow/merge -----------------------------------------
+
+    private int height(BPlusTree tree) {
+        int h = 1;
+        BTreeNode n = tree.readNode(tree.getRootPageId());
+        while (!n.leaf) {
+            h++;
+            n = tree.readNode(n.children.get(0));
+        }
+        return h;
+    }
+
+    @Test
+    void deleteFromSingleLeaf() {
+        BufferPool bp = newPool(8);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT, 3);
+        tree.insert(Value.ofInt(1), new RID(1, 0));
+        tree.insert(Value.ofInt(2), new RID(2, 0));
+        tree.insert(Value.ofInt(3), new RID(3, 0));
+
+        assertTrue(tree.delete(Value.ofInt(2), new RID(2, 0)));
+        assertNull(tree.search(Value.ofInt(2)));
+        assertEquals(new RID(1, 0), tree.search(Value.ofInt(1)));
+        assertEquals(new RID(3, 0), tree.search(Value.ofInt(3)));
+        assertEquals(List.of(1, 3), scanChainInts(tree));
+    }
+
+    @Test
+    void deleteNonexistentReturnsFalse() {
+        BufferPool bp = newPool(8);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT, 3);
+        tree.insert(Value.ofInt(1), new RID(1, 0));
+        assertFalse(tree.delete(Value.ofInt(9), new RID(9, 0)));
+        assertFalse(tree.delete(Value.ofInt(1), new RID(2, 0))); // right key, wrong rid
+        assertEquals(new RID(1, 0), tree.search(Value.ofInt(1)));
+    }
+
+    @Test
+    void deleteWithBorrowAndMergeKeepsTreeValid() {
+        BufferPool bp = newPool(32);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT, 2);
+        for (int i = 1; i <= 20; i++) {
+            tree.insert(Value.ofInt(i), new RID(i, 0));
+        }
+        // Delete a scattered set; each delete may trigger borrow or merge.
+        int[] toDelete = {1, 2, 3, 10, 11, 19, 20, 7};
+        java.util.Set<Integer> deleted = new java.util.HashSet<>();
+        for (int k : toDelete) {
+            assertTrue(tree.delete(Value.ofInt(k), new RID(k, 0)), "delete " + k);
+            deleted.add(k);
+            assertBalanced(tree);
+        }
+        List<Integer> remaining = scanChainInts(tree);
+        for (int i = 1; i <= 20; i++) {
+            if (deleted.contains(i)) {
+                assertNull(tree.search(Value.ofInt(i)), "deleted key still present: " + i);
+                assertFalse(remaining.contains(i));
+            } else {
+                assertEquals(new RID(i, 0), tree.search(Value.ofInt(i)), "missing key " + i);
+            }
+        }
+        assertEquals(20 - toDelete.length, remaining.size());
+    }
+
+    @Test
+    void deleteAllEmptiesTree() {
+        BufferPool bp = newPool(32);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT, 2);
+        for (int i = 1; i <= 30; i++) {
+            tree.insert(Value.ofInt(i), new RID(i, 0));
+        }
+        for (int i = 1; i <= 30; i++) {
+            assertTrue(tree.delete(Value.ofInt(i), new RID(i, 0)));
+        }
+        assertTrue(tree.readNode(tree.getRootPageId()).leaf, "tree should collapse back to a leaf root");
+        assertEquals(0, scanChainInts(tree).size());
+        assertNull(tree.search(Value.ofInt(15)));
+    }
+
+    @Test
+    void deleteShrinksHeight() {
+        BufferPool bp = newPool(32);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT, 2);
+        for (int i = 1; i <= 30; i++) {
+            tree.insert(Value.ofInt(i), new RID(i, 0));
+        }
+        int tall = height(tree);
+        assertTrue(tall >= 3, "expected a multi-level tree, got height " + tall);
+        for (int i = 1; i <= 28; i++) {
+            tree.delete(Value.ofInt(i), new RID(i, 0));
+        }
+        assertTrue(height(tree) < tall, "height should shrink after many deletes");
+        assertEquals(List.of(29, 30), scanChainInts(tree));
+        assertBalanced(tree);
+    }
+
+    @Test
+    void randomizedInsertDelete() {
+        BufferPool bp = newPool(64);
+        BPlusTree tree = BPlusTree.create(bp, ColumnType.INT, 3);
+        int n = 200;
+        for (int i = 0; i < n; i++) {
+            tree.insert(Value.ofInt(i), new RID(i, 0));
+        }
+        List<Integer> order = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            order.add(i);
+        }
+        java.util.Collections.shuffle(order, new java.util.Random(7));
+        java.util.Set<Integer> deleted = new java.util.HashSet<>();
+        for (int i = 0; i < n / 2; i++) {
+            int k = order.get(i);
+            assertTrue(tree.delete(Value.ofInt(k), new RID(k, 0)));
+            deleted.add(k);
+        }
+        assertBalanced(tree);
+        List<Integer> remaining = scanChainInts(tree);
+        assertEquals(n - deleted.size(), remaining.size());
+        for (int i = 0; i < n; i++) {
+            if (deleted.contains(i)) {
+                assertNull(tree.search(Value.ofInt(i)));
+            } else {
+                assertEquals(new RID(i, 0), tree.search(Value.ofInt(i)));
+            }
+        }
+    }
+
     @Test
     void defaultOrderFitsInAPage() {
         // 2*order entries at max key size must fit a node payload.

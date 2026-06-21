@@ -357,6 +357,207 @@ public final class BPlusTree {
         return node;
     }
 
+    // ---- 13.5: delete + borrow/merge ------------------------------------------
+
+    /** A non-root node underflows (must borrow or merge) below this many keys. */
+    private int minKeys() {
+        return order;
+    }
+
+    /**
+     * Remove the entry {@code (key, rid)}. Returns {@code false} if no such
+     * entry exists. Leaf underflow is repaired by borrowing from a sibling when
+     * one has a spare entry, otherwise by merging; the fix-up propagates up the
+     * tree and shrinks the root by one level when it is left with a single
+     * child.
+     *
+     * <p>Merged-away pages are orphaned (the disk manager has no free list); this
+     * is a deliberate capstone simplification — correctness holds, only the file
+     * may retain unused pages until rebuilt.
+     */
+    public boolean delete(Value key, RID rid) {
+        BTreeNode leaf = locateLeaf(key, rid);
+        if (leaf == null) {
+            return false;
+        }
+        int idx = indexOfEntry(leaf, key, rid);
+        leaf.keys.remove(idx);
+        leaf.rids.remove(idx);
+        writeNode(leaf);
+
+        if (leaf.pageId != rootPageId && leaf.keyCount() < minKeys()) {
+            handleLeafUnderflow(leaf);
+        }
+        return true;
+    }
+
+    /** Find the leaf holding the exact {@code (key, rid)} entry, or null. */
+    private BTreeNode locateLeaf(Value key, RID rid) {
+        BTreeNode leaf = findLeafForLowerBound(key);
+        while (leaf != null) {
+            for (int i = 0; i < leaf.keyCount(); i++) {
+                int c = compare(leaf.keys.get(i), key);
+                if (c > 0) {
+                    return null; // walked past the key
+                }
+                if (c == 0 && leaf.rids.get(i).equals(rid)) {
+                    return leaf;
+                }
+            }
+            leaf = (leaf.nextLeaf == Constants.INVALID_PAGE_ID) ? null : readNode(leaf.nextLeaf);
+        }
+        return null;
+    }
+
+    private int indexOfEntry(BTreeNode leaf, Value key, RID rid) {
+        for (int i = 0; i < leaf.keyCount(); i++) {
+            if (compare(leaf.keys.get(i), key) == 0 && leaf.rids.get(i).equals(rid)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private void handleLeafUnderflow(BTreeNode leaf) {
+        BTreeNode parent = readNode(leaf.parentPageId);
+        int idx = parent.children.indexOf(leaf.pageId);
+
+        // Borrow from the left sibling.
+        if (idx > 0) {
+            BTreeNode left = readNode(parent.children.get(idx - 1));
+            if (left.keyCount() > minKeys()) {
+                int last = left.keyCount() - 1;
+                leaf.keys.add(0, left.keys.remove(last));
+                leaf.rids.add(0, left.rids.remove(last));
+                parent.keys.set(idx - 1, leaf.keys.get(0));
+                writeNode(left);
+                writeNode(leaf);
+                writeNode(parent);
+                return;
+            }
+        }
+        // Borrow from the right sibling.
+        if (idx < parent.children.size() - 1) {
+            BTreeNode right = readNode(parent.children.get(idx + 1));
+            if (right.keyCount() > minKeys()) {
+                leaf.keys.add(right.keys.remove(0));
+                leaf.rids.add(right.rids.remove(0));
+                parent.keys.set(idx, right.keys.get(0));
+                writeNode(right);
+                writeNode(leaf);
+                writeNode(parent);
+                return;
+            }
+        }
+        // Merge with a sibling.
+        if (idx > 0) {
+            BTreeNode left = readNode(parent.children.get(idx - 1));
+            left.keys.addAll(leaf.keys);
+            left.rids.addAll(leaf.rids);
+            left.nextLeaf = leaf.nextLeaf;
+            parent.keys.remove(idx - 1);
+            parent.children.remove(idx);
+            writeNode(left);
+            afterChildRemoved(parent);
+        } else {
+            BTreeNode right = readNode(parent.children.get(idx + 1));
+            leaf.keys.addAll(right.keys);
+            leaf.rids.addAll(right.rids);
+            leaf.nextLeaf = right.nextLeaf;
+            parent.keys.remove(idx);
+            parent.children.remove(idx + 1);
+            writeNode(leaf);
+            afterChildRemoved(parent);
+        }
+    }
+
+    private void handleInnerUnderflow(BTreeNode node) {
+        BTreeNode parent = readNode(node.parentPageId);
+        int idx = parent.children.indexOf(node.pageId);
+
+        // Borrow from the left sibling: rotate the separator down, lift left's last key up.
+        if (idx > 0) {
+            BTreeNode left = readNode(parent.children.get(idx - 1));
+            if (left.keyCount() > minKeys()) {
+                int lastKey = left.keyCount() - 1;
+                int lastChild = left.children.size() - 1;
+                node.keys.add(0, parent.keys.get(idx - 1));
+                node.children.add(0, left.children.remove(lastChild));
+                parent.keys.set(idx - 1, left.keys.remove(lastKey));
+                reparentOne(node.children.get(0), node.pageId);
+                writeNode(left);
+                writeNode(node);
+                writeNode(parent);
+                return;
+            }
+        }
+        // Borrow from the right sibling.
+        if (idx < parent.children.size() - 1) {
+            BTreeNode right = readNode(parent.children.get(idx + 1));
+            if (right.keyCount() > minKeys()) {
+                node.keys.add(parent.keys.get(idx));
+                node.children.add(right.children.remove(0));
+                parent.keys.set(idx, right.keys.remove(0));
+                reparentOne(node.children.get(node.children.size() - 1), node.pageId);
+                writeNode(right);
+                writeNode(node);
+                writeNode(parent);
+                return;
+            }
+        }
+        // Merge with a sibling, pulling the separator down between them.
+        if (idx > 0) {
+            BTreeNode left = readNode(parent.children.get(idx - 1));
+            left.keys.add(parent.keys.get(idx - 1));
+            left.keys.addAll(node.keys);
+            left.children.addAll(node.children);
+            reparent(node.children, left.pageId);
+            parent.keys.remove(idx - 1);
+            parent.children.remove(idx);
+            writeNode(left);
+            afterChildRemoved(parent);
+        } else {
+            BTreeNode right = readNode(parent.children.get(idx + 1));
+            node.keys.add(parent.keys.get(idx));
+            node.keys.addAll(right.keys);
+            node.children.addAll(right.children);
+            reparent(right.children, node.pageId);
+            parent.keys.remove(idx);
+            parent.children.remove(idx + 1);
+            writeNode(node);
+            afterChildRemoved(parent);
+        }
+    }
+
+    /**
+     * After a key/child was removed from {@code parent}: shrink the tree if the
+     * root is now empty, otherwise persist and recurse if the parent underflows.
+     */
+    private void afterChildRemoved(BTreeNode parent) {
+        if (parent.pageId == rootPageId) {
+            if (!parent.leaf && parent.keyCount() == 0) {
+                int onlyChild = parent.children.get(0);
+                BTreeNode child = readNode(onlyChild);
+                child.parentPageId = Constants.INVALID_PAGE_ID;
+                writeNode(child);
+                rootPageId = onlyChild;
+            } else {
+                writeNode(parent);
+            }
+            return;
+        }
+        writeNode(parent);
+        if (parent.keyCount() < minKeys()) {
+            handleInnerUnderflow(parent);
+        }
+    }
+
+    private void reparentOne(int childId, int parentId) {
+        BTreeNode child = readNode(childId);
+        child.parentPageId = parentId;
+        writeNode(child);
+    }
+
     private void validateKey(Value key) {
         if (key == null || key.isNull()) {
             throw new StorageException("B+Tree keys must be non-null");
