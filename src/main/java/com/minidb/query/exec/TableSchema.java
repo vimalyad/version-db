@@ -4,9 +4,12 @@ import com.minidb.shared.ColumnMeta;
 import com.minidb.shared.ColumnType;
 import com.minidb.shared.StorageException;
 import com.minidb.shared.TableMeta;
+import com.minidb.shared.Value;
 import com.minidb.storage.Catalog;
+import com.minidb.storage.TupleCodec;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -44,5 +47,12 @@ final class TableSchema {
 
     int indexOf(String column) {
         return columnNames.indexOf(column);
+    }
+
+    /** Decode raw tuple bytes into a runtime {@link Tuple} labelled with this table. */
+    Tuple toTuple(byte[] bytes) {
+        List<Value> values = TupleCodec.decode(bytes, columnTypes);
+        List<String> tables = Collections.nCopies(columnNames.size(), tableName);
+        return new Tuple(tables, columnNames, values);
     }
 }

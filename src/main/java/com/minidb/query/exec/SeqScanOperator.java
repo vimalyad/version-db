@@ -3,14 +3,10 @@ package com.minidb.query.exec;
 import com.minidb.query.ast.Expression;
 import com.minidb.shared.RID;
 import com.minidb.shared.StorageException;
-import com.minidb.shared.Value;
 import com.minidb.storage.HeapFile;
-import com.minidb.storage.TupleCodec;
 import com.minidb.txn.Transaction;
 
-import java.util.Collections;
 import java.util.Iterator;
-import java.util.List;
 
 /**
  * Full table scan ({@code part2.md} §6.4). Walks the heap, and for <em>every</em>
@@ -55,7 +51,7 @@ public final class SeqScanOperator implements Operator {
             if (visible == null) {
                 continue; // not visible to this snapshot
             }
-            Tuple tuple = decode(visible);
+            Tuple tuple = schema.toTuple(visible);
             if (predicate == null || ExpressionEvaluator.test(predicate, tuple)) {
                 return tuple;
             }
@@ -66,11 +62,5 @@ public final class SeqScanOperator implements Operator {
     @Override
     public void close() {
         scan = null;
-    }
-
-    private Tuple decode(byte[] bytes) {
-        List<Value> values = TupleCodec.decode(bytes, schema.columnTypes);
-        List<String> tables = Collections.nCopies(schema.columnNames.size(), tableName);
-        return new Tuple(tables, schema.columnNames, values);
     }
 }
