@@ -25,7 +25,7 @@ How to use it:
 | 6 — Recovery (ARIES) | `phase-06-recovery` | M1 | done (6.5 deferred to Phase 7) |
 | 7 — Commit Log | `phase-07-commitlog` | M3 | done |
 | 8 — Transaction Manager | `phase-08-txnmgr` | M3 | done |
-| 9 — Snapshot Manager | `phase-09-snapshot` | M3 | in progress |
+| 9 — Snapshot Manager | `phase-09-snapshot` | M3 | done |
 | 10 — MVCC Manager | `phase-10-mvcc` | M3 | not started |
 | 11 — Vacuum / GC | `phase-11-vacuum` | M3 | not started |
 | 12 — SQL Parser | `phase-12-parser` | M2 | not started |
@@ -128,3 +128,4 @@ Newest entries at the top. Format per entry:
 ### Phase 9 — Snapshot Manager  (branch: phase-09-snapshot)
 - [2026-06-21] 9.1 — Already delivered in 8.1: `txn/Snapshot` is the immutable `(xmin, xmax, inProgressXids)` record (defensive `Set.copyOf` → unmodifiable) with the `isInProgress(xid)` helper. No new code; recorded here so the sub-phase is accounted for.
 - [2026-06-21] 9.2 — `txn/SnapshotManager`: extracts snapshot capture out of `TransactionManager`. `createSnapshot()` delegates to a new package-private `TransactionManager.captureSnapshot()` that reads `nextXid` and the active set under `txnLock` (reentrant, so it also serves the call already inside `beginTransaction`), guaranteeing one consistent instant: `xmin` = smallest active XID (or `nextXid` if none), `xmax` = `nextXid`, `inProgressXids` = copy of the active keys. `beginTransaction()` now captures via `snapshotManager.createSnapshot()` (replacing the inlined 8.3 stub) — still captured before the new XID is registered, so a transaction's own snapshot excludes itself (own writes are made visible by XID match, standard SI). `TransactionManager.getSnapshotManager()` exposes it for the MVCC Manager (Phase 10). Files: `txn/SnapshotManager.java`, `txn/TransactionManager.java`, `test/.../txn/SnapshotManagerTest.java`.
+- [2026-06-21] 9.3 — Isolation-level switch. New `txn/IsolationLevel` enum (`READ_COMMITTED`, `REPEATABLE_READ`; `DEFAULT = REPEATABLE_READ` = Snapshot Isolation). `Transaction` now carries a final `isolationLevel` (added a 3-arg constructor; the old 2-arg one defaults to `DEFAULT`, so existing call sites are unaffected). `TransactionManager.beginTransaction(IsolationLevel)` overload added; the no-arg form delegates with the default. New `snapshotForStatement(Transaction)` applies the level at each statement boundary: REPEATABLE READ returns the stable begin-time snapshot unchanged; READ COMMITTED captures a fresh snapshot, installs it as the transaction's current snapshot, and returns it (so a later statement observes commits made after the previous statement). Files: `txn/IsolationLevel.java`, `txn/Transaction.java`, `txn/TransactionManager.java`, `test/.../txn/SnapshotManagerTest.java`. **Phase 9 complete.**

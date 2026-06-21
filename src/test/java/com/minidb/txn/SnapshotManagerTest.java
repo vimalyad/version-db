@@ -212,4 +212,94 @@ class SnapshotManagerTest {
         tm.commitTransaction(t1);
         tm.commitTransaction(t3);
     }
+
+    // ---- 9.3: isolation-level snapshot switch --------------------------------
+
+    @Test
+    void beginDefaultsToRepeatableRead() {
+        Transaction txn = tm.beginTransaction();
+        assertEquals(IsolationLevel.REPEATABLE_READ, txn.isolationLevel,
+                "default isolation level is REPEATABLE READ (Snapshot Isolation)");
+        tm.commitTransaction(txn);
+    }
+
+    @Test
+    void beginRespectsExplicitIsolationLevel() {
+        Transaction txn = tm.beginTransaction(IsolationLevel.READ_COMMITTED);
+        assertEquals(IsolationLevel.READ_COMMITTED, txn.isolationLevel);
+        tm.commitTransaction(txn);
+    }
+
+    @Test
+    void repeatableReadReusesBeginSnapshotAcrossStatements() {
+        Transaction t = tm.beginTransaction(IsolationLevel.REPEATABLE_READ);
+        Snapshot begin = t.getSnapshot();
+
+        // A concurrent transaction begins and commits while t is running.
+        Transaction other = tm.beginTransaction();
+        tm.commitTransaction(other);
+
+        Snapshot s1 = tm.snapshotForStatement(t);
+        Snapshot s2 = tm.snapshotForStatement(t);
+
+        assertSame(begin, s1, "REPEATABLE READ reuses the begin-time snapshot");
+        assertSame(begin, s2, "and keeps reusing it across statements");
+        // other started after t, so it was never visible and stays invisible:
+        // its XID is >= the stable snapshot's xmax.
+        assertTrue(other.xid >= begin.xmax(),
+                "a transaction that began after t is beyond t's stable snapshot");
+
+        tm.commitTransaction(t);
+    }
+
+    @Test
+    void readCommittedTakesFreshSnapshotPerStatement() {
+        Transaction t = tm.beginTransaction(IsolationLevel.READ_COMMITTED);
+        long beginXmax = t.getSnapshot().xmax();
+
+        // Statement 1: another transaction is still in progress.
+        Transaction other = tm.beginTransaction();
+        Snapshot s1 = tm.snapshotForStatement(t);
+        assertTrue(s1.isInProgress(other.xid),
+                "statement 1 sees the concurrent txn as in-progress");
+        assertSame(s1, t.getSnapshot(), "the fresh snapshot becomes the current one");
+
+        // The concurrent transaction commits between statements.
+        tm.commitTransaction(other);
+
+        // Statement 2: a brand-new snapshot now reflects that commit.
+        Snapshot s2 = tm.snapshotForStatement(t);
+        assertNotSame(s1, s2, "READ COMMITTED takes a new snapshot each statement");
+        assertFalse(s2.isInProgress(other.xid),
+                "statement 2 no longer sees the now-committed txn as in-progress");
+        assertTrue(s2.xmax() >= s1.xmax(), "xmax advances as transactions complete");
+        assertTrue(s2.xmax() > beginXmax,
+                "the per-statement snapshot has moved past the begin snapshot");
+
+        tm.commitTransaction(t);
+    }
+
+    @Test
+    void repeatableReadDoesNotObserveCommitThatReadCommittedWould() {
+        // Same scenario, two isolation levels, contrasting outcomes.
+        Transaction rr = tm.beginTransaction(IsolationLevel.REPEATABLE_READ);
+        Transaction rc = tm.beginTransaction(IsolationLevel.READ_COMMITTED);
+
+        Transaction writer = tm.beginTransaction();
+        tm.commitTransaction(writer);
+
+        // REPEATABLE READ: stable snapshot, writer was beyond it from the start.
+        Snapshot rrSnap = tm.snapshotForStatement(rr);
+        assertTrue(writer.xid >= rrSnap.xmax(),
+                "writer is invisible to the stable REPEATABLE READ snapshot");
+
+        // READ COMMITTED: fresh snapshot now includes the committed writer in range
+        // and not in-progress → visible.
+        Snapshot rcSnap = tm.snapshotForStatement(rc);
+        assertTrue(writer.xid < rcSnap.xmax() && !rcSnap.isInProgress(writer.xid),
+                "writer is visible to the refreshed READ COMMITTED snapshot");
+
+        tm.commitTransaction(rr);
+        tm.commitTransaction(rc);
+    }
 }
