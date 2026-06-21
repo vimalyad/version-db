@@ -19,7 +19,7 @@ How to use it:
 | 0 — Foundation | `phase-00-foundation` | shared | done |
 | 1 — Page & DiskManager | `phase-01-storage-page` | M1 | done |
 | 2 — Buffer Pool | `phase-02-bufferpool` | M1 | done |
-| 3 — Heap File | `phase-03-heapfile` | M1 | not started |
+| 3 — Heap File | `phase-03-heapfile` | M1 | in progress |
 | 4 — Catalog | `phase-04-catalog` | M1 | not started |
 | 5 — WAL Manager | `phase-05-wal` | M1 | not started |
 | 6 — Recovery (ARIES) | `phase-06-recovery` | M1 | not started |
@@ -84,3 +84,6 @@ Newest entries at the top. Format per entry:
 - [2026-06-21] 2.3 — Clock eviction: `evict()` sweeps the frame array with a `clockHand`, giving each unpinned frame with `refBit=true` one second chance (clear bit, continue); evicts the first unpinned frame with `refBit=false`. Dirty victim written to disk before eviction. `fetchPage` and `newPage` now call `evict()` on cache miss; all-pinned pool throws `StorageException`. Files: `storage/BufferPool.java`, `test/.../storage/BufferPoolTest.java`.
 - [2026-06-21] 2.4 — `flushPage(pageId)` and `flushAll()` with the WAL rule: `walFlushCallback.flushToLsn(page.lsn)` is called before every dirty-page disk write in both `flushPage` and `evict()`'s dirty-victim path, via a shared `writeDirtyFrame(frame)` helper. `flushPage` is a no-op for clean pages; `flushAll` iterates all frames. Files: `storage/BufferPool.java`, `test/.../storage/BufferPoolTest.java`.
 - [2026-06-21] 2.5 — Thread safety: single `ReentrantLock` guards all frame-array and page-table mutations; lock is released around every disk I/O (read in `fetchPage`/`newPage`, WAL+write in `writeDirtyFrame`). A dirty victim in `evict()` is temporarily pinned (`pinCount=1`) before the lock is released for I/O, preventing re-eviction by another thread. Concurrent smoke test passes. Files: `storage/BufferPool.java`, `test/.../storage/BufferPoolTest.java`. **Phase 2 complete** (62 tests green).
+
+### Phase 3 — Heap File  (branch: phase-03-heapfile)
+- [2026-06-21] 3.1 — `storage/HeapFile`: singly-linked page chain via each page's `nextPageId`. `create(bufferPool)` allocates the first page; `new HeapFile(bufferPool, firstPageId)` opens an existing heap and walks the chain to rebuild the in-memory page list; `getFirstPageId()` (persisted by the catalog) and `getPageCount()`. All page access via the buffer pool. Files: `storage/HeapFile.java`, `test/.../storage/HeapFileTest.java`.
