@@ -72,7 +72,12 @@ public final class CommitLog implements AutoCloseable {
         }
     }
 
-    /** Record the status of a transaction, growing the array as needed. */
+    /**
+     * Record the status of a transaction, growing the array as needed. The
+     * single touched byte is written through to disk and fsynced before
+     * returning, so a committed/aborted status is durable immediately (the
+     * commit/abort path depends on this).
+     */
     public void setStatus(long xid, TxStatus status) {
         checkXid(xid);
         lock.lock();
@@ -82,9 +87,21 @@ public final class CommitLog implements AutoCloseable {
             int shift = (int) (xid % STATUSES_PER_BYTE) * BITS_PER_STATUS;
             int cleared = buffer[byteIndex] & ~(STATUS_MASK << shift);
             buffer[byteIndex] = (byte) (cleared | (status.code() << shift));
+            try {
+                file.seek(byteIndex);
+                file.write(buffer[byteIndex]);
+                file.getFD().sync();
+            } catch (IOException e) {
+                throw new StorageException("failed to persist commit-log status for xid " + xid, e);
+            }
         } finally {
             lock.unlock();
         }
+    }
+
+    /** O(1) convenience check used on the hot visibility path. */
+    public boolean isCommitted(long xid) {
+        return getStatus(xid) == TxStatus.COMMITTED;
     }
 
     @Override
