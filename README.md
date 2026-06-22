@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.svg" alt="VersionDB logo" width="128" height="128">
+</p>
+
 # VersionDB
 
 A single-node relational database engine built from scratch in **Java 17**. VersionDB
